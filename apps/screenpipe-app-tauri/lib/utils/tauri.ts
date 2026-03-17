@@ -71,8 +71,36 @@ async checkArcAutomationPermission() : Promise<boolean> {
 async requestArcAutomationPermission() : Promise<boolean> {
     return await TAURI_INVOKE("request_arc_automation_permission");
 },
+/**
+ * Returns the names of installed Chromium browsers that need Automation permission
+ */
+async getInstalledBrowsers() : Promise<string[]> {
+    return await TAURI_INVOKE("get_installed_browsers");
+},
+/**
+ * Check if Automation permission is granted for all installed Chromium browsers.
+ * Returns true only if ALL installed browsers have automation granted.
+ */
+async checkBrowsersAutomationPermission() : Promise<boolean> {
+    return await TAURI_INVOKE("check_browsers_automation_permission");
+},
+/**
+ * Request Automation permission for installed Chromium browsers that are already running.
+ * Never force-launches browsers — only prompts for ones the user already has open.
+ * Opens System Settings > Automation as fallback for browsers not running.
+ */
+async requestBrowsersAutomationPermission() : Promise<boolean> {
+    return await TAURI_INVOKE("request_browsers_automation_permission");
+},
 async getEnv(name: string) : Promise<string> {
     return await TAURI_INVOKE("get_env", { name });
+},
+/**
+ * Returns which E2E seeds are requested (env SCREENPIPE_E2E_SEED, comma-separated).
+ * Rust uses "onboarding" in setup to complete onboarding at startup.
+ */
+async getE2eSeedFlags() : Promise<string[]> {
+    return await TAURI_INVOKE("get_e2e_seed_flags");
 },
 /**
  * Check vault lock state from filesystem (no server needed).
@@ -525,6 +553,19 @@ async removeSyncDevice(deviceId: string) : Promise<Result<null, string>> {
 }
 },
 /**
+ * Delete all locally-stored data that was synced from a specific remote device.
+ * This calls the local screenpipe server's /data/delete-device endpoint.
+ * Refuses to delete data for the current device as a safety guard.
+ */
+async deleteDeviceLocalData(machineId: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("delete_device_local_data", { machineId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Initialize sync with password.
  * This initializes both the local SyncManager (for device queries) and
  * the server's SyncService (for actual data sync).
@@ -702,130 +743,6 @@ async chatgptOauthLogout() : Promise<Result<boolean, string>> {
 async chatgptOauthModels() : Promise<Result<string[], string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("chatgpt_oauth_models") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Check Reminders authorization + scheduler status (no popup).
- */
-async remindersStatus() : Promise<Result<RemindersStatus, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_status") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Request Reminders permission (shows one-time macOS popup).
- * Returns "granted", "denied", or an error message.
- */
-async remindersAuthorize() : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_authorize") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * List existing reminders in the "Screenpipe" list.
- */
-async remindersList() : Promise<Result<ReminderItem[], string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_list") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Create a single reminder.
- */
-async remindersCreate(title: string, notes: string | null, due: string | null) : Promise<Result<ReminderItem, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_create", { title, notes, due }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Scan recent activity and create reminders from action items.
- * Optional custom_prompt appended to the AI instructions.
- */
-async remindersScan(customPrompt: string | null, audioOnly: boolean | null) : Promise<Result<ScanResult, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_scan", { customPrompt, audioOnly }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Start the background scheduler (30-min interval). Persists across page navigation.
- * Saves enabled=true to persistent store so it auto-starts on app relaunch.
- */
-async remindersStartScheduler() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_start_scheduler") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Stop the background scheduler. Saves enabled=false to persistent store.
- */
-async remindersStopScheduler() : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_stop_scheduler") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get the saved custom prompt.
- */
-async remindersGetCustomPrompt() : Promise<Result<string, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_get_custom_prompt") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Save a custom prompt.
- */
-async remindersSetCustomPrompt(prompt: string) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_set_custom_prompt", { prompt }) };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Get the audio_only setting.
- */
-async remindersGetAudioOnly() : Promise<Result<boolean, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_get_audio_only") };
-} catch (e) {
-    if(e instanceof Error) throw e;
-    else return { status: "error", error: e  as any };
-}
-},
-/**
- * Set the audio_only setting.
- */
-async remindersSetAudioOnly(audioOnly: boolean) : Promise<Result<null, string>> {
-    try {
-    return { status: "ok", data: await TAURI_INVOKE("reminders_set_audio_only", { audioOnly }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -1068,9 +985,6 @@ apiKey: string | null;
  */
 maxTokens?: number }
 export type PipeSuggestionsSettings = { enabled: boolean; frequencyHours: number }
-export type ReminderItem = { identifier: string; title: string; notes: string | null; completed: boolean }
-export type RemindersStatus = { available: boolean; authorized: boolean; authorizationStatus: string; schedulerRunning: boolean; reminderCount: number }
-export type ScanResult = { remindersCreated: bigint; items: ReminderItem[]; contextChars: bigint; error: string | null }
 export type SettingsStore = 
 /**
  * Catch-all for fields added by the frontend (e.g. chatHistory, deviceId)

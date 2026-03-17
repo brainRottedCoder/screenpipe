@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "Inflector"
+version = "0.11.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe438c63458706e03479442743baae6c88256498e6431708f6dfc520a26515d3"
+
+[[package]]
 name = "ab_glyph"
 version = "0.2.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -231,6 +237,14 @@ dependencies = [
  "anstyle",
  "once_cell_polyfill",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "antirez-asr-sys"
+version = "0.1.0"
+source = "git+https://github.com/screenpipe/audiopipe.git?rev=b199cf5b3d1e0e87604f02910240a2bc8851cf9a#b199cf5b3d1e0e87604f02910240a2bc8851cf9a"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -526,8 +540,9 @@ dependencies = [
 [[package]]
 name = "audiopipe"
 version = "0.2.0"
-source = "git+https://github.com/screenpipe/audiopipe.git?rev=1785a66884a6a9a42826b1a0fbf5a17f7b5c53f4#1785a66884a6a9a42826b1a0fbf5a17f7b5c53f4"
+source = "git+https://github.com/screenpipe/audiopipe.git?rev=b199cf5b3d1e0e87604f02910240a2bc8851cf9a#b199cf5b3d1e0e87604f02910240a2bc8851cf9a"
 dependencies = [
+ "antirez-asr-sys",
  "hf-hub 0.4.3",
  "qwen3-asr-sys",
  "serde",
@@ -1113,7 +1128,7 @@ dependencies = [
 [[package]]
 name = "cidre"
 version = "0.15.0"
-source = "git+https://github.com/yury/cidre.git#72f799e667b3d4989563dd51cbdaa6dd5969933d"
+source = "git+https://github.com/yury/cidre.git#19cd289660fe2dc95caac39e28bd1d1f0fba9ba4"
 dependencies = [
  "cc",
  "cidre-macros 0.5.0",
@@ -1473,7 +1488,7 @@ dependencies = [
 [[package]]
 name = "cpal"
 version = "0.15.3"
-source = "git+https://github.com/screenpipe/cpal.git?branch=main#b8a63e0d3d52d016061e6880abb2aad51b4f51e3"
+source = "git+https://github.com/screenpipe/cpal.git?branch=main#1be10a9d67ac7e6b9e0225d2d67ec56058a7dba2"
 dependencies = [
  "alsa",
  "cidre 0.15.0",
@@ -5510,7 +5525,7 @@ version = "3.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e67ba7e9b2b56446f1d419b1d807906278ffa1a658a8a5d8a39dcb1f5a78614f"
 dependencies = [
- "toml_edit",
+ "toml_edit 0.25.4+spec-1.1.0",
 ]
 
 [[package]]
@@ -5727,7 +5742,7 @@ checksum = "640c9bd8497b02465aeef5375144c26062e0dcd5939dfcbb0f5db76cb8c17c73"
 [[package]]
 name = "qwen3-asr-sys"
 version = "0.1.0"
-source = "git+https://github.com/screenpipe/audiopipe.git?rev=1785a66884a6a9a42826b1a0fbf5a17f7b5c53f4#1785a66884a6a9a42826b1a0fbf5a17f7b5c53f4"
+source = "git+https://github.com/screenpipe/audiopipe.git?rev=b199cf5b3d1e0e87604f02910240a2bc8851cf9a#b199cf5b3d1e0e87604f02910240a2bc8851cf9a"
 dependencies = [
  "cc",
  "cmake",
@@ -6436,7 +6451,7 @@ dependencies = [
 [[package]]
 name = "sck-rs"
 version = "0.1.0"
-source = "git+https://github.com/screenpipe/sck-rs#e2a30a14159559f1f4071f424fba02c09b809dc9"
+source = "git+https://github.com/screenpipe/sck-rs#1561f06250991346f75a8b9120023ce7fe88b83e"
 dependencies = [
  "cidre 0.15.0",
  "image",
@@ -6498,7 +6513,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-audio"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "anyhow",
  "audiopipe",
@@ -6556,8 +6571,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "screenpipe-config"
+version = "0.3.186"
+dependencies = [
+ "dirs 6.0.0",
+ "serde",
+ "serde_json",
+ "specta",
+ "tempfile",
+ "toml 0.8.23",
+ "tracing",
+]
+
+[[package]]
 name = "screenpipe-connect"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6583,7 +6611,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-core"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "accessibility",
  "accessibility-sys",
@@ -6626,7 +6654,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-db"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6651,7 +6679,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-engine"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -6688,6 +6716,7 @@ dependencies = [
  "screenpipe-a11y",
  "screenpipe-apple-intelligence",
  "screenpipe-audio",
+ "screenpipe-config",
  "screenpipe-connect",
  "screenpipe-core",
  "screenpipe-db",
@@ -6718,7 +6747,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-events"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "anyhow",
  "chrono",
@@ -6736,7 +6765,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-screen"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "accessibility-sys",
  "anyhow",
@@ -6776,7 +6805,7 @@ dependencies = [
 
 [[package]]
 name = "screenpipe-vault"
-version = "0.3.183"
+version = "0.3.186"
 dependencies = [
  "argon2",
  "chacha20poly1305",
@@ -7057,6 +7086,15 @@ dependencies = [
 
 [[package]]
 name = "serde_spanned"
+version = "0.6.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "serde_spanned"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8bbf91e5a4d6315eee45e704372590b30e260ee83af6639d64557f51b067776"
@@ -7296,6 +7334,28 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "specta"
+version = "2.0.0-rc.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ccbb212565d2dc177bc15ecb7b039d66c4490da892436a4eee5b394d620c9bc"
+dependencies = [
+ "specta-macros",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "specta-macros"
+version = "2.0.0-rc.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68999d29816965eb9e5201f60aec02a76512139811661a7e8e653abc810b8f72"
+dependencies = [
+ "Inflector",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -7924,7 +7984,7 @@ dependencies = [
  "cfg-expr",
  "heck 0.5.0",
  "pkg-config",
- "toml",
+ "toml 0.9.12+spec-1.1.0",
  "version-compare",
 ]
 
@@ -8242,17 +8302,38 @@ dependencies = [
 
 [[package]]
 name = "toml"
+version = "0.8.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc1beb996b9d83529a9e75c17a1686767d148d70663143c7854d8b4a09ced362"
+dependencies = [
+ "serde",
+ "serde_spanned 0.6.9",
+ "toml_datetime 0.6.11",
+ "toml_edit 0.22.27",
+]
+
+[[package]]
+name = "toml"
 version = "0.9.12+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
 dependencies = [
  "indexmap 2.13.0",
  "serde_core",
- "serde_spanned",
+ "serde_spanned 1.0.4",
  "toml_datetime 0.7.5+spec-1.1.0",
  "toml_parser",
  "toml_writer",
  "winnow",
+]
+
+[[package]]
+name = "toml_datetime"
+version = "0.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "22cddaf88f4fbc13c51aebbf5f8eceb5c7c5a9da2ac40a13519eb5b0a0e8f11c"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -8275,6 +8356,20 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
+version = "0.22.27"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "41fe8c660ae4257887cf66394862d21dbca4a6ddd26f04a3560410406a2f819a"
+dependencies = [
+ "indexmap 2.13.0",
+ "serde",
+ "serde_spanned 0.6.9",
+ "toml_datetime 0.6.11",
+ "toml_write",
+ "winnow",
+]
+
+[[package]]
+name = "toml_edit"
 version = "0.25.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7193cbd0ce53dc966037f54351dbbcf0d5a642c7f0038c382ef9e677ce8c13f2"
@@ -8293,6 +8388,12 @@ checksum = "702d4415e08923e7e1ef96cd5727c0dfed80b4d2fa25db9647fe5eb6f7c5a4c4"
 dependencies = [
  "winnow",
 ]
+
+[[package]]
+name = "toml_write"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d99f8c9a7727884afe522e9bd5edbfc91a3312b36a77b5fb8926e4c31a41801"
 
 [[package]]
 name = "toml_writer"
@@ -9916,9 +10017,9 @@ dependencies = [
 
 [[package]]
 name = "xcap"
-version = "0.8.3"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bdf4c8d4c33dfab96fb585cdf991a7bd86d754ac35edd4b80477a9b739892b2"
+checksum = "4e68ffe10c83f18354f0bcf6d9038d5e133c7d91af57baca50d1b90bea83257c"
 dependencies = [
  "dispatch2",
  "image",

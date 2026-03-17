@@ -53,6 +53,7 @@ import { Badge } from "../ui/badge";
 import { toast } from "../ui/use-toast";
 import { Card, CardContent } from "../ui/card";
 import { AIProviderType } from "@screenpipe/browser";
+import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -894,7 +895,7 @@ const AISection = ({
             { id: "claude-sonnet-4-5", name: "Sonnet 4.5 (balanced)", provider: "screenpipe" },
             { id: "claude-opus-4-6", name: "Opus 4.6 (powerful, pro)", provider: "screenpipe" },
             { id: "gemini-3-flash", name: "Gemini 3 Flash (fast)", provider: "screenpipe" },
-            { id: "gemini-3-pro", name: "Gemini 3.1 Pro (balanced)", provider: "screenpipe" },
+            { id: "gemini-3.1-pro", name: "Gemini 3.1 Pro (balanced)", provider: "screenpipe" },
           ];
           setModels(piModels);
           break;
@@ -1487,6 +1488,7 @@ export const AIPresets = () => {
     null
   );
   const [isDuplicating, setIsDuplicating] = useState(false);
+  const isEnterprise = useIsEnterpriseBuild();
   const [piAvailable, setPiAvailable] = useState(false);
 
   // Check Pi availability (installed at app startup by Rust background thread)
@@ -1497,11 +1499,13 @@ export const AIPresets = () => {
         setPiAvailable(true);
       }
     };
-    checkPi();
+    if (!isEnterprise) {
+      checkPi();
+    }
     // Re-check periodically in case background install finishes
-    const interval = setInterval(checkPi, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    const interval = isEnterprise ? null : setInterval(checkPi, 5000);
+    return () => { if (interval) clearInterval(interval); };
+  }, [isEnterprise]);
 
   useEffect(() => {
     if (!createPresetsDialog) {
@@ -1643,15 +1647,10 @@ export const AIPresets = () => {
   if (!settings.aiPresets?.length) {
     return (
       <div className="space-y-5">
-        <div className="space-y-1">
-          <h1 className="text-xl font-bold tracking-tight text-foreground">
-            AI Settings
-          </h1>
-          <p className="text-muted-foreground text-sm">
-            Configure AI models and preferences
-          </p>
-        </div>
-        
+        <p className="text-muted-foreground text-sm mb-4">
+          Configure AI models and preferences
+        </p>
+
         <div className="w-full h-[400px] flex flex-col items-center justify-center space-y-4">
           <Settings2 className="w-12 h-12 text-muted-foreground" />
           <h2 className="text-xl font-medium text-muted-foreground">
@@ -1672,15 +1671,10 @@ export const AIPresets = () => {
 
   return (
     <div className="space-y-5">
-      <div className="space-y-1">
-        <h1 className="text-xl font-bold tracking-tight text-foreground">
-          AI Settings
-        </h1>
-        <p className="text-muted-foreground text-sm">
-          Configure AI models and preferences
-        </p>
-      </div>
-      
+      <p className="text-muted-foreground text-sm mb-4">
+        Configure AI models and preferences
+      </p>
+
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-4">
           <Badge variant="outline" className="px-3 py-1">
@@ -1700,7 +1694,7 @@ export const AIPresets = () => {
       </div>
 
       <div className="w-full grid grid-cols-1 md:grid-cols-2 gap-6">
-        {settings.aiPresets.map((preset) => {
+        {settings.aiPresets.filter((preset) => !isEnterprise || preset.provider !== "pi").map((preset) => {
           const isDefault = preset.defaultPreset;
           const hasValidation = preset.provider && preset.model && preset.url;
           

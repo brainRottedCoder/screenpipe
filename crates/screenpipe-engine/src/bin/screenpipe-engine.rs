@@ -5,7 +5,6 @@
 use clap::Parser;
 #[allow(unused_imports)]
 use colored::Colorize;
-use dirs::home_dir;
 use futures::pin_mut;
 use port_check::is_local_ipv4_port_free;
 use screenpipe_audio::{
@@ -14,6 +13,7 @@ use screenpipe_audio::{
 };
 use screenpipe_core::agents::AgentExecutor;
 use screenpipe_core::find_ffmpeg_path;
+use screenpipe_core::paths;
 use screenpipe_db::DatabaseManager;
 use screenpipe_engine::{
     analytics,
@@ -27,7 +27,7 @@ use screenpipe_engine::{
         Cli, CliAudioTranscriptionEngine, Command,
     },
     hot_frame_cache::HotFrameCache,
-    start_meeting_persister, start_meeting_watcher, start_power_manager, start_sleep_monitor,
+    start_meeting_watcher, start_power_manager, start_sleep_monitor,
     start_speaker_identification, start_ui_recording,
     vision_manager::{start_monitor_watcher, stop_monitor_watcher, VisionManager},
     watch_pid, ResourceMonitor, SCServer,
@@ -120,9 +120,7 @@ const DISPLAY: &str = r"
 ";
 
 fn get_base_dir(custom_path: &Option<String>) -> anyhow::Result<PathBuf> {
-    let default_path = home_dir()
-        .ok_or_else(|| anyhow::anyhow!("failed to get home directory"))?
-        .join(".screenpipe");
+    let default_path = paths::default_screenpipe_data_dir();
 
     let base_dir = custom_path
         .as_ref()
@@ -668,6 +666,11 @@ async fn main() -> anyhow::Result<()> {
 
     let local_data_dir_clone_2 = local_data_dir_clone.clone();
 
+    // Shared manual meeting lock — bridges the HTTP meeting routes and the meeting persister
+    // so a manually-started meeting suppresses auto-detection transitions.
+    let manual_meeting: std::sync::Arc<tokio::sync::RwLock<Option<i64>>> =
+        std::sync::Arc::new(tokio::sync::RwLock::new(None));
+
     let mut server = SCServer::new(
         db_server,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), config.port),
@@ -682,6 +685,7 @@ async fn main() -> anyhow::Result<()> {
     server.audio_metrics = audio_manager.metrics.clone();
     server.hot_frame_cache = Some(hot_frame_cache);
     server.power_manager = Some(power_manager);
+    server.manual_meeting = Some(manual_meeting.clone());
 
     // Attach sync handle if sync is enabled
     let server = if let Some(ref handle) = sync_service_handle {
@@ -706,7 +710,7 @@ async fn main() -> anyhow::Result<()> {
     // Create pipe store backed by the main SQLite DB
     let pipe_store: Option<std::sync::Arc<dyn screenpipe_core::pipes::PipeStore>> =
         Some(std::sync::Arc::new(
-            screenpipe_engine::pipe_store::SqlitePipeStore::new(db.pool.clone()),
+            screenpipe_engine::pipe_store::SqlitePipeStore::new(db.clone()),
         ));
 
     let mut pipe_manager = screenpipe_core::pipes::PipeManager::new(
@@ -1000,21 +1004,18 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    // Start meeting watcher (standalone accessibility listener for smart mode)
+    // Start v2 meeting detection (UI scanning for call controls)
     // Independent of enable_input_capture/enable_accessibility — only needs accessibility permission
-    let _meeting_watcher_handle = meeting_detector
-        .as_ref()
-        .map(|detector| start_meeting_watcher(detector.clone()));
-
-    // Persist meeting state transitions to DB (smart mode only)
-    let _meeting_persister_handle = meeting_detector
-        .as_ref()
-        .map(|detector| start_meeting_persister(detector.clone(), db.clone()));
-
-    // Bridge calendar events from event bus into meeting detector
-    let _calendar_bridge_handle = meeting_detector
-        .as_ref()
-        .map(|detector| screenpipe_engine::start_calendar_bridge(detector.clone()));
+    let _meeting_watcher_handle = {
+        let v2_in_meeting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        start_meeting_watcher(
+            db.clone(),
+            v2_in_meeting,
+            manual_meeting.clone(),
+            shutdown_tx.subscribe(),
+            meeting_detector.clone(),
+        )
+    };
 
     // Start calendar-assisted speaker identification
     let _speaker_id_handle = start_speaker_identification(db.clone(), config.user_name.clone());

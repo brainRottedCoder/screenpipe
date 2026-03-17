@@ -168,6 +168,7 @@ pub struct MemoryRecord {
     pub source_context: Option<String>,
     pub tags: Option<String>,
     pub importance: f64,
+    pub frame_id: Option<i64>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -376,6 +377,8 @@ pub struct FrameRow {
     pub window_name: String,
     pub ocr_text: String,
     pub text_json: String,
+    /// Accessibility tree JSON — used as fallback for bounding boxes when OCR text_json is empty
+    pub accessibility_tree_json: Option<String>,
 }
 
 /// Lightweight frame row for grouped search — skips text/text_json columns.

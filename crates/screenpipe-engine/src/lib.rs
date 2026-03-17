@@ -22,6 +22,7 @@ pub mod routes;
 
 pub mod event_driven_capture;
 pub mod hot_frame_cache;
+pub mod meeting_detector;
 pub mod meeting_persister;
 pub mod meeting_watcher;
 pub mod paired_capture;
@@ -42,12 +43,10 @@ pub use axum::Json as JsonResponse;
 pub use cli::Cli;
 pub use recording_config::RecordingConfig;
 
-pub use calendar_bridge::start_calendar_bridge;
 pub use calendar_speaker_id::start_speaker_identification;
 pub use cloud_search::{CloudSearchClient, CloudSearchMetadata, CloudStatus};
-pub use meeting_persister::start_meeting_persister;
 pub use meeting_watcher::start_meeting_watcher;
-pub use power::{start_power_manager, PowerManagerHandle};
+pub use power::{start_power_manager, start_power_manager_with_pref, PowerManagerHandle};
 pub use resource_monitor::{ResourceMonitor, RestartSignal};
 pub use screenpipe_core::Language;
 pub use server::health_check_handler as health_check;

@@ -32,7 +32,7 @@ const MIN_AGE_SECS: i64 = 600; // 10 minutes
 const POLL_INTERVAL_SECS: u64 = 300; // 5 minutes
 
 /// Maximum frames per MP4 chunk at normal thermal load.
-const MAX_FRAMES_PER_CHUNK: usize = 500;
+const MAX_FRAMES_PER_CHUNK: usize = 100;
 
 /// Smaller batch size when system is thermally stressed.
 const THROTTLED_FRAMES_PER_CHUNK: usize = 50;
@@ -224,7 +224,22 @@ async fn compact_chunk(
                 break;
             }
         }
-        dims.ok_or_else(|| anyhow::anyhow!("no readable JPEG found in chunk"))?
+        match dims {
+            Some(d) => d,
+            None => {
+                // All JPEGs gone/unreadable — clear stale DB pointers so we don't retry
+                let ids: Vec<i64> = frames.iter().map(|(id, _, _)| *id).collect();
+                debug!(
+                    "snapshot compaction: clearing {} stale snapshot_path entries for {} (files missing)",
+                    ids.len(),
+                    device_name
+                );
+                for batch in ids.chunks(100) {
+                    let _ = db.clear_snapshot_paths_queued(batch.to_vec()).await;
+                }
+                return Ok(None);
+            }
+        }
     };
 
     debug!(
@@ -253,7 +268,13 @@ async fn compact_chunk(
     for (frame_id, snapshot_path, _) in frames {
         let jpeg_path = Path::new(snapshot_path);
         if !jpeg_path.exists() {
-            warn!("snapshot file missing, skipping: {}", snapshot_path);
+            debug!(
+                "snapshot file missing, clearing DB pointer: {}",
+                snapshot_path
+            );
+            // Route through write queue instead of read pool to avoid
+            // unserialized writes that cause WAL contention and pool exhaustion.
+            let _ = db.clear_snapshot_paths_queued(vec![*frame_id]).await;
             continue;
         }
 
@@ -302,31 +323,17 @@ async fn compact_chunk(
 
     // Only update frames that were actually encoded into the video.
     // Use their real video position as offset_index (not array index).
-    let mut tx = db.begin_immediate_with_retry().await?;
+    // Process in separate transactions per batch to avoid holding the write
+    // semaphore for too long, which starves audio/frame insertion and causes
+    // PoolTimedOut errors (data loss).
     for batch in encoded_frames.chunks(100) {
-        let ids: Vec<i64> = batch.iter().map(|(id, _)| *id).collect();
-        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
-        let case_clauses: Vec<String> = batch
-            .iter()
-            .map(|(id, pos)| format!("WHEN {} THEN {}", id, pos))
-            .collect();
-
-        let sql = format!(
-            "UPDATE frames SET video_chunk_id = ?1, \
-             offset_index = CASE id {} END, \
-             snapshot_path = NULL \
-             WHERE id IN ({}) AND snapshot_path IS NOT NULL",
-            case_clauses.join(" "),
-            placeholders.join(",")
-        );
-
-        let mut query = sqlx::query(&sql).bind(chunk_id);
-        for id in &ids {
-            query = query.bind(id);
+        let batch_vec: Vec<(i64, u32)> = batch.to_vec();
+        if let Err(e) = db.compact_snapshots_queued(chunk_id, batch_vec).await {
+            warn!("snapshot compaction: queue submit failed for batch: {}", e);
         }
-        query.execute(&mut **tx.conn()).await?;
+        // Yield briefly between batches
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
-    tx.commit().await?;
 
     // Step 3: Delete source JPEGs (safe — DB already points to MP4)
     let mut deleted = 0u32;
@@ -536,7 +543,7 @@ mod tests {
             ThermalState::Serious => (THROTTLED_FRAMES_PER_CHUNK, 30),
             ThermalState::Critical => (THROTTLED_FRAMES_PER_CHUNK, 120),
         };
-        assert_eq!(chunk_size, 500);
+        assert_eq!(chunk_size, 100);
         assert_eq!(delay, 0);
     }
 

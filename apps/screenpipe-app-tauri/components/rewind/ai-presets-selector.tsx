@@ -58,6 +58,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { AIPreset, commands } from "@/lib/utils/tauri";
+import { useIsEnterpriseBuild } from "@/lib/hooks/use-is-enterprise-build";
 
 // Helper to detect UUID-like strings and format preset names nicely
 const formatPresetName = (name: string): string => {
@@ -181,6 +182,7 @@ export function AIProviderConfig({
   const [isLoadingModels, setIsLoadingModels] = useState(false);
   const [idError, setIdError] = useState<string | null>(null);
   const [showApiKey, setShowApiKey] = useState(false);
+  const isEnterprise = useIsEnterpriseBuild();
   const [piAvailable, setPiAvailable] = useState(false);
 
   // Check Pi availability (installed at app startup by Rust background thread)
@@ -195,11 +197,13 @@ export function AIProviderConfig({
         console.error("Failed to check pi:", e);
       }
     };
-    checkPi();
+    if (!isEnterprise) {
+      checkPi();
+    }
     // Re-check periodically in case background install finishes
-    const interval = setInterval(checkPi, 5000);
-    return () => clearInterval(interval);
-  }, []);
+    const interval = isEnterprise ? null : setInterval(checkPi, 5000);
+    return () => { if (interval) clearInterval(interval); };
+  }, [isEnterprise]);
   const [formData, setFormData] = useState<AIPreset>({
     provider: defaultPreset?.provider || "openai",
     apiKey: defaultPreset?.apiKey || "",
@@ -913,9 +917,13 @@ export const AIPresetsSelector = ({
   >();
 
   const isControlled = onControlledSelect !== undefined;
+  const isEnterprise = useIsEnterpriseBuild();
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  const aiPresets = (settings?.aiPresets || []) as AIPreset[];
+  const aiPresets = useMemo(() => {
+    const presets = (settings?.aiPresets || []) as AIPreset[];
+    return isEnterprise ? presets.filter((p) => p.provider !== "pi") : presets;
+  }, [settings?.aiPresets, isEnterprise]);
 
   const selectedPreset = useMemo(() => {
     if (isControlled) return controlledPresetId ?? undefined;
@@ -1188,8 +1196,8 @@ export const AIPresetsSelector = ({
                   )}
                 >
                   {selectedPreset ? (
-                    <div className="flex w-full items-center justify-between gap-2 overflow-hidden">
-                      <div className="flex items-center gap-2 min-w-[80px] max-w-[30%]">
+                    <div className="flex w-full items-center justify-between gap-2 overflow-hidden min-w-0">
+                      <div className="flex items-center gap-2 min-w-0 flex-shrink overflow-hidden">
                         {selectedPresetRequiresLogin && (
                           <AlertTriangle className="h-4 w-4 text-amber-500 shrink-0" />
                         )}
@@ -1201,15 +1209,15 @@ export const AIPresetsSelector = ({
                           )}
                         </span>
                       </div>
-                      <div className="flex items-center gap-2 text-xs text-muted-foreground overflow-hidden">
-                        <span className="rounded bg-muted px-1.5 py-0.5 whitespace-nowrap">
+                      <div className="flex items-center gap-2 text-xs text-muted-foreground min-w-0 flex-1 justify-end overflow-hidden">
+                        <span className="rounded bg-muted px-1.5 py-0.5 whitespace-nowrap shrink-0">
                           {
                             aiPresets.find(
                               (preset) => preset.id === selectedPreset,
                             )?.provider
                           }
                         </span>
-                        <span className="hidden sm:block truncate max-w-[30%]">
+                        <span className="hidden sm:block truncate min-w-0" title={aiPresets.find((p) => p.id === selectedPreset)?.model}>
                           {
                             aiPresets.find(
                               (preset) => preset.id === selectedPreset,
@@ -1243,7 +1251,7 @@ export const AIPresetsSelector = ({
               </TooltipContent>
             </Tooltip>
           </TooltipProvider>
-          <PopoverContent className="min-w-[500px] w-[--radix-popover-trigger-width] p-0">
+          <PopoverContent side="top" sideOffset={6} className="min-w-[500px] w-[--radix-popover-trigger-width] p-0">
             <Command>
               <CommandInput placeholder="search presets..." />
               <CommandList>

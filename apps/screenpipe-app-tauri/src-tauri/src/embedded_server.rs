@@ -18,7 +18,7 @@ use screenpipe_engine::{
     analytics,
     hot_frame_cache::HotFrameCache,
     server::bind_listener,
-    start_meeting_watcher, start_power_manager, start_sleep_monitor, start_ui_recording,
+    start_meeting_watcher, start_power_manager_with_pref, start_sleep_monitor, start_ui_recording,
     vision_manager::{start_monitor_watcher, stop_monitor_watcher, VisionManager},
     RecordingConfig, ResourceMonitor, SCServer,
 };
@@ -261,8 +261,16 @@ pub async fn start_embedded_server(
     // Create shared pipeline metrics (used by recording + health endpoint + PostHog)
     let vision_metrics = Arc::new(screenpipe_screen::PipelineMetrics::new());
 
-    // Start power manager — polls battery/thermal state and broadcasts profile changes
-    let power_manager = start_power_manager();
+    // Start power manager — polls battery/thermal state and broadcasts profile changes.
+    // Restore user's persisted power mode preference so it survives app restarts.
+    let initial_power_pref = config
+        .power_mode
+        .as_deref()
+        .and_then(|s| serde_json::from_value::<screenpipe_engine::power::PowerMode>(
+            serde_json::Value::String(s.to_string()),
+        ).ok())
+        .unwrap_or_default();
+    let power_manager = start_power_manager_with_pref(initial_power_pref);
 
     // Capture trigger sender — set by VisionManager when vision is enabled.
     // Passed to start_ui_recording so UI events (clicks, app switches) trigger captures.
@@ -351,22 +359,21 @@ pub async fn start_embedded_server(
         None
     };
 
-    // Start meeting watcher (standalone accessibility listener for smart mode)
+    // Shared manual meeting lock — used by both the HTTP API and the meeting persister
+    let manual_meeting = std::sync::Arc::new(tokio::sync::RwLock::new(None::<i64>));
+
+    // Start v2 meeting detection (UI scanning for call controls)
     // Independent of enable_input_capture/enable_accessibility toggles — only needs accessibility permission
-    if let Some(ref detector) = meeting_detector {
-        let detector_clone = detector.clone();
-        let _meeting_watcher = start_meeting_watcher(detector_clone);
-        // Handle kept alive by the spawned task — no need to store it
-        info!("meeting watcher started");
-
-        // Persist meeting state transitions to DB (was missing — meetings were never saved in desktop app)
-        let _meeting_persister =
-            screenpipe_engine::start_meeting_persister(detector.clone(), db.clone());
-        info!("meeting persister started");
-
-        // Bridge calendar events from event bus into meeting detector
-        let _calendar_bridge = screenpipe_engine::start_calendar_bridge(detector.clone());
-        info!("calendar bridge started for meeting detection");
+    {
+        let v2_in_meeting = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _meeting_watcher = start_meeting_watcher(
+            db.clone(),
+            v2_in_meeting,
+            manual_meeting.clone(),
+            shutdown_tx.subscribe(),
+            meeting_detector.clone(),
+        );
+        info!("meeting watcher started (v2 UI scanning)");
     }
 
     // Start calendar-assisted speaker identification
@@ -405,6 +412,7 @@ pub async fn start_embedded_server(
     server.audio_metrics = audio_manager.metrics.clone();
     server.hot_frame_cache = Some(hot_frame_cache);
     server.power_manager = Some(power_manager);
+    server.manual_meeting = Some(manual_meeting);
 
     // Initialize pipe manager
     let pipes_dir = config.data_dir.join("pipes");
@@ -421,7 +429,7 @@ pub async fn start_embedded_server(
     // Create pipe store backed by the main SQLite DB
     let pipe_store: Option<std::sync::Arc<dyn screenpipe_core::pipes::PipeStore>> =
         Some(std::sync::Arc::new(
-            screenpipe_engine::pipe_store::SqlitePipeStore::new(db.pool.clone()),
+            screenpipe_engine::pipe_store::SqlitePipeStore::new(db.clone()),
         ));
 
     let mut pipe_manager = screenpipe_core::pipes::PipeManager::new(

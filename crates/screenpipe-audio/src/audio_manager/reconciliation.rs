@@ -204,10 +204,11 @@ pub async fn reconcile_untranscribed(
 
         // Batch-delete orphan chunks (missing audio files)
         if !orphan_chunk_ids.is_empty() {
-            if let Err(e) = db.delete_audio_chunks_batch(&orphan_chunk_ids).await {
+            if let Err(e) = db.delete_audio_chunks_batch_queued(orphan_chunk_ids.clone()).await {
                 warn!(
                     "reconciliation: failed to batch-delete {} orphan chunks: {}",
-                    orphan_chunk_ids.len(), e
+                    orphan_chunk_ids.len(),
+                    e
                 );
                 consecutive_db_errors += 1;
             } else {
@@ -279,10 +280,11 @@ pub async fn reconcile_untranscribed(
                 old_chunks.len()
             );
             let old_chunk_ids: Vec<i64> = old_chunks.iter().map(|c| c.id).collect();
-            if let Err(e) = db.delete_audio_chunks_batch(&old_chunk_ids).await {
+            if let Err(e) = db.delete_audio_chunks_batch_queued(old_chunk_ids.clone()).await {
                 warn!(
                     "reconciliation: failed to batch-delete {} silent chunks: {}",
-                    old_chunks.len(), e
+                    old_chunks.len(),
+                    e
                 );
                 consecutive_db_errors += 1;
             } else {
@@ -437,7 +439,7 @@ async fn finalize_batch(
     // Delete secondary chunks — they're merged into the primary
     if !pending.secondary_chunk_ids.is_empty() {
         if let Err(e) = db
-            .delete_audio_chunks_batch(&pending.secondary_chunk_ids)
+            .delete_audio_chunks_batch_queued(pending.secondary_chunk_ids.clone())
             .await
         {
             warn!(
@@ -502,7 +504,8 @@ async fn retry_pending_transcriptions(
         // (e.g. by archive cleanup), the INSERT will always fail with a FK
         // constraint violation — remove the orphaned pending file instead of
         // retrying forever.
-        let chunk_exists = db.audio_chunk_exists(pending.audio_chunk_id)
+        let chunk_exists = db
+            .audio_chunk_exists(pending.audio_chunk_id)
             .await
             .unwrap_or(false);
 

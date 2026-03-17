@@ -8,6 +8,7 @@ import { useSettings } from "@/lib/hooks/use-settings";
 import { Switch } from "@/components/ui/switch";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
 import { Rocket, Moon, Sun, Monitor, FlaskConical, Shield, ExternalLink, Layers, RefreshCw, Undo2, MessageSquare, Lightbulb } from "lucide-react";
 import { HelpTooltip } from "@/components/ui/help-tooltip";
@@ -83,17 +84,13 @@ export default function GeneralSettings() {
   };
 
   return (
-    <div className="space-y-5">
-      <div className="space-y-1">
-        <div className="flex items-center justify-between">
-          <h1 className="text-xl font-bold tracking-tight text-foreground">
-            General
-          </h1>
+    <div className="space-y-5" data-testid="section-settings-general">
+      <p className="text-muted-foreground text-sm mb-4">
+        Startup, updates, and notifications
+      </p>
+
+      <div className="flex items-center justify-end">
           <UpdateBanner compact />
-        </div>
-        <p className="text-muted-foreground text-sm">
-          Startup, updates, and notifications
-        </p>
       </div>
 
       <div className="space-y-2">
@@ -241,6 +238,28 @@ export default function GeneralSettings() {
                   }}
                 />
               </div>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* restart notifications */}
+        <Card>
+          <CardContent className="p-4">
+            <div className="flex items-center justify-between">
+              <div className="space-y-1">
+                <Label className="text-sm font-medium">
+                  restart notifications
+                </Label>
+                <p className="text-xs text-muted-foreground">
+                  show a notification when audio or screen capture stalls
+                </p>
+              </div>
+              <Switch
+                checked={settings?.showRestartNotifications !== false}
+                onCheckedChange={(checked) =>
+                  handleSettingsChange({ showRestartNotifications: checked })
+                }
+              />
             </div>
           </CardContent>
         </Card>

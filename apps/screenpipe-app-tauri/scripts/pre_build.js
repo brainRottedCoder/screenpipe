@@ -6,8 +6,8 @@ import { $ } from 'bun'
 import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
-
-const isDevMode = process.env.SCREENPIPE_APP_DEV === 'true' || false;
+import { setupOpenBlas } from './setup_openblas.js'
+import { findWget, find7z } from './find_tools.js'
 
 const originalCWD = process.cwd()
 // Change CWD to src-tauri
@@ -28,9 +28,10 @@ const config = {
 	windows: {
 		ffmpegName: 'ffmpeg-8.0.1-full_build-shared',
 		ffmpegUrl: 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-8.0.1-full_build-shared.7z',
-		// Windows ARM64 (aarch64-pc-windows-msvc) — tordona/ffmpeg-win-arm64, full-shared for bin/ + lib/
-		ffmpegNameArm64: 'ffmpeg-master-latest-full-shared-win-arm64',
-		ffmpegUrlArm64: 'https://github.com/tordona/ffmpeg-win-arm64/releases/download/latest/ffmpeg-master-latest-full-shared-win-arm64.7z',
+		// Windows ARM64 (aarch64-pc-windows-msvc) — tordona/ffmpeg-win-arm64
+		// Resolved dynamically at build time via GitHub API (daily autobuilds change filenames)
+		ffmpegArm64GithubRepo: 'tordona/ffmpeg-win-arm64',
+		ffmpegArm64AssetPattern: /shared.*win-arm64\.7z$/,
 	},
 	linux: {
 		aptPackages: [
@@ -59,63 +60,9 @@ const config = {
 	macos: {
 		ffmpegUrlArm: 'https://www.osxexperts.net/ffmpeg7arm.zip',
 		ffprobeUrlArm: 'https://www.osxexperts.net/ffprobe71arm.zip',
-		ffmpegUrlx86_64: 'https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffmpeg.zip',
+		ffmpegUrlx86_64: 'https://www.osxexperts.net/ffmpeg80intel.zip',
 		ffprobeUrlx86_64: 'https://www.osxexperts.net/ffprobe71intel.zip',
 	},
-}
-
-async function findWget() {
-	const possiblePaths = [
-		'C:\\ProgramData\\chocolatey\\bin\\wget.exe',
-		'C:\\Program Files\\Git\\mingw64\\bin\\wget.exe',
-		'C:\\msys64\\usr\\bin\\wget.exe',
-		'C:\\Windows\\System32\\wget.exe',
-		'C:\\wget\\wget.exe',
-		'wget' // This will work if wget is in PATH
-	];
-
-	for (const wgetPath of possiblePaths) {
-		try {
-			await $`${wgetPath} --version`.quiet();
-			console.log(`wget found at: ${wgetPath}`);
-			return wgetPath;
-		} catch (error) {
-			// wget not found at this path, continue searching
-		}
-	}
-
-	console.error('wget not found. Please install wget and make sure it\'s in your PATH.');
-	process.exit(1);
-}
-
-async function find7z() {
-	const possiblePaths = [
-		'C:\\Program Files\\7-Zip\\7z.exe',
-		'C:\\Program Files (x86)\\7-Zip\\7z.exe',
-		path.join(process.env.LOCALAPPDATA || '', 'Programs', '7-Zip', '7z.exe'),
-	];
-
-	for (const p of possiblePaths) {
-		if (p && (await fs.stat(p).catch(() => null))) {
-			console.log(`7z found at: ${p}`);
-			return p;
-		}
-	}
-
-	// Last resort: 7z in PATH (e.g. after restarting terminal post winget install)
-	try {
-		await $`7z`.quiet();
-	} catch {
-		try {
-			await $`7z --help`.quiet();
-		} catch {
-			console.error('7-Zip (7z) not found. Install it with: winget install -e --id 7zip.7zip');
-			console.error('Then restart your terminal so PATH is updated (see CONTRIBUTING.md Windows setup).');
-			process.exit(1);
-		}
-	}
-	console.log('7z found in PATH');
-	return '7z';
 }
 
 // Export for Github actions
@@ -204,7 +151,35 @@ async function copyBunBinary() {
 		bunDest1 = path.join(cwd, `bun-${bunTripleSuffix}.exe`)
 		console.log('copying bun from:', bunSrc);
 		console.log('copying bun to:', bunDest1);
-	} else if (platform === 'macos' || platform === 'linux') {
+	} else if (platform === 'linux') {
+		bunDest1 = path.join(cwd, 'bun-x86_64-unknown-linux-gnu');
+
+		if (await fs.exists(bunDest1)) {
+			console.log('bun binary already exists for tauri.');
+			return;
+		}
+
+		// Download the baseline bun variant for broader glibc compatibility
+		// (the standard variant is built on Ubuntu 24.04 and crashes on older glibc distros)
+		const bunVersion = '1.3.10';
+		const baselineUrl = `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/bun-linux-x64-baseline.zip`;
+		console.log(`downloading bun baseline v${bunVersion} for linux...`);
+		const tmpZip = path.join(cwd, 'bun-baseline.zip');
+		try {
+			await $`curl -L -o ${tmpZip} ${baselineUrl}`;
+			await $`unzip -o ${tmpZip} -d ${cwd}/bun-baseline-tmp`;
+			const extractedBun = path.join(cwd, 'bun-baseline-tmp', 'bun-linux-x64-baseline', 'bun');
+			await copyFile(extractedBun, bunDest1);
+			console.log(`bun baseline binary installed to ${bunDest1}`);
+			// cleanup
+			await fs.rm(tmpZip, { force: true });
+			await fs.rm(path.join(cwd, 'bun-baseline-tmp'), { recursive: true, force: true });
+		} catch (error) {
+			console.error('failed to download bun baseline:', error);
+			process.exit(1);
+		}
+		return;
+	} else if (platform === 'macos') {
 		const possibleBunPaths = [
 			path.join(os.homedir(), '.bun', 'bin', 'bun'),
 		];
@@ -235,12 +210,8 @@ async function copyBunBinary() {
 			throw new Error('Could not find bun binary. Please check if bun is installed correctly');
 		}
 
-		if (platform === 'macos') {
-			bunDest1 = path.join(cwd, 'bun-aarch64-apple-darwin');
-			bunDest2 = path.join(cwd, 'bun-x86_64-apple-darwin');
-		} else {
-			bunDest1 = path.join(cwd, 'bun-x86_64-unknown-linux-gnu');
-		}
+		bunDest1 = path.join(cwd, 'bun-aarch64-apple-darwin');
+		bunDest2 = path.join(cwd, 'bun-x86_64-apple-darwin');
 	}
 
 	if (await fs.exists(bunDest1)) {
@@ -273,37 +244,42 @@ async function copyFile(src, dest) {
 
 /* ########## Linux ########## */
 if (platform == 'linux') {
-	// Check and install APT packages
-	try {
-		const aptPackagesNotInstalled = [];
+	// In CI, cache-apt-pkgs-action already installs packages; skip redundant apt install
+	const inCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
+	if (inCI) {
+		console.log('CI detected: apt packages handled by workflow cache-apt-pkgs-action ✅\n');
+	} else {
+		// Check and install APT packages (local dev)
+		try {
+			const aptPackagesNotInstalled = [];
 
-		// Check each package installation status
-		for (const pkg of config.linux.aptPackages) {
-			try {
-				await $`dpkg -s ${pkg}`.quiet();
-			} catch {
-				aptPackagesNotInstalled.push(pkg);
+			// Check each package installation status
+			for (const pkg of config.linux.aptPackages) {
+				try {
+					await $`dpkg -s ${pkg}`.quiet();
+				} catch {
+					aptPackagesNotInstalled.push(pkg);
+				}
 			}
-		}
 
-		if (aptPackagesNotInstalled.length > 0) {
-			console.log('the following required packages are missing:');
-			aptPackagesNotInstalled.forEach(pkg => console.log(`  - ${pkg}`));
-			console.log('\ninstalling missing packages...');
+			if (aptPackagesNotInstalled.length > 0) {
+				console.log('the following required packages are missing:');
+				aptPackagesNotInstalled.forEach(pkg => console.log(`  - ${pkg}`));
+				console.log('\ninstalling missing packages...');
 
-			console.log('updating package lists...');
-			await $`sudo apt-get -qq update`;
-			
-			console.log('installing packages...');
-			await $`sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y ${aptPackagesNotInstalled}`;
-			console.log('Package installation completed successfully ✅\n');
-		} else {
-			console.log('all required packages are already installed ✅\n');
+				console.log('updating package lists...');
+				await $`sudo apt-get -qq update`;
+
+				console.log('installing packages...');
+				await $`sudo DEBIAN_FRONTEND=noninteractive apt-get -qq install -y ${aptPackagesNotInstalled}`;
+				console.log('Package installation completed successfully ✅\n');
+			} else {
+				console.log('all required packages are already installed ✅\n');
+			}
+		} catch (error) {
+			console.error("error checking/installing apt packages: %s", error.message);
 		}
-	} catch (error) {
-		console.error("error checking/installing apt packages: %s", error.message);
 	}
-
 
 	// Setup FFMPEG
 	if (!(await fs.exists(config.ffmpegRealname))) {
@@ -429,8 +405,17 @@ if (platform == 'windows') {
 	// Setup FFMPEG (x64: gyan.dev; arm64: tordona/ffmpeg-win-arm64)
 	if (!(await fs.exists(config.ffmpegRealname))) {
 		if (winArch === 'arm64') {
-			await $`${wgetPath} --no-config --tries=10 --retry-connrefused --waitretry=10 --secure-protocol=auto --no-check-certificate --show-progress ${config.windows.ffmpegUrlArm64} -O ${config.windows.ffmpegNameArm64}.7z`
-			await $`${sevenZ} x ${config.windows.ffmpegNameArm64}.7z`
+			// Resolve download URL dynamically from GitHub API (daily autobuilds change filenames)
+			const apiUrl = `https://api.github.com/repos/${config.windows.ffmpegArm64GithubRepo}/releases/latest`
+			const releaseResp = await fetch(apiUrl)
+			const releaseData = await releaseResp.json()
+			const asset = releaseData.assets?.find((a) => config.windows.ffmpegArm64AssetPattern.test(a.name))
+			if (!asset) throw new Error(`No matching ffmpeg ARM64 asset found in ${apiUrl}`)
+			const arm64Url = asset.browser_download_url
+			const arm64Filename = asset.name
+			console.log(`ffmpeg ARM64: ${arm64Url}`)
+			await $`${wgetPath} --no-config --tries=10 --retry-connrefused --waitretry=10 --secure-protocol=auto --no-check-certificate --show-progress ${arm64Url} -O ${arm64Filename}`
+			await $`${sevenZ} x ${arm64Filename}`
 			// tordona 7z extracts to a single folder; move its contents to ffmpeg (or rename if single top-level dir)
 			const entries = await fs.readdir(cwd, { withFileTypes: true })
 			const extractedDir = entries.find((d) => d.isDirectory() && d.name.startsWith('ffmpeg-') && d.name.includes('win-arm64'))
@@ -443,7 +428,7 @@ if (platform == 'windows') {
 					await fs.rename(path.join(cwd, e.name), path.join(cwd, config.ffmpegRealname, e.name))
 				}
 			}
-			await fs.rm(path.join(cwd, `${config.windows.ffmpegNameArm64}.7z`), { force: true }).catch(() => {})
+			await fs.rm(path.join(cwd, arm64Filename), { force: true }).catch(() => {})
 		} else {
 			await $`${wgetPath} --no-config --tries=10 --retry-connrefused --waitretry=10 --secure-protocol=auto --no-check-certificate --show-progress ${config.windows.ffmpegUrl} -O ${config.windows.ffmpegName}.7z`
 			await $`${sevenZ} x ${config.windows.ffmpegName}.7z`
@@ -461,6 +446,8 @@ if (platform == 'windows') {
 			await fs.writeFile(placeholder, '')
 		}
 	}
+
+	exports.openBlas = await setupOpenBlas({ cwd, winArch })
 
 	// Copy VC143 CRT DLLs for Tauri bundle (required in CI; optional locally). Use arch matching current Windows (x64 or arm64).
 		const inCI = process.env.CI === 'true' || process.env.GITHUB_ACTIONS === 'true';
@@ -571,7 +558,6 @@ if (action?.includes('--build' || action.includes('--dev'))) {
 	process.env['FFMPEG_DIR'] = exports.ffmpeg
 	if (platform === 'windows') {
 		process.env['OPENBLAS_PATH'] = exports.openBlas
-		process.env['CLBlast_DIR'] = exports.clblast
 		process.env['LIBCLANG_PATH'] = exports.libClang
 		process.env['PATH'] = `${process.env['PATH']};${exports.cmake}`
 	}

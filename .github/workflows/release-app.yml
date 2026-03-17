@@ -489,7 +489,9 @@ jobs:
             patchelf \
             libwebkit2gtk-4.1-dev \
             xdg-desktop-portal-gtk \
-            libsecret-1-dev
+            libsecret-1-dev \
+            libopenblas-dev
+          echo "OPENBLAS_PATH=/usr/lib/x86_64-linux-gnu" >> $GITHUB_ENV
 
       - name: Install frontend dependencies
         working-directory: ${{ github.workspace }}/apps/screenpipe-app-tauri
@@ -792,6 +794,7 @@ jobs:
           # Fix whisper.cpp crash on newer CPUs (Lunar Lake, etc.) that lack AVX-512
           # GGML_NATIVE=ON compiles with -march=native, causing illegal instruction on CPUs without AVX-512
           CMAKE_ARGS: -DGGML_NATIVE=OFF -DGGML_AVX512=OFF -DGGML_AVX512_VBMI=OFF -DGGML_AVX512_VNNI=OFF -DGGML_AVX512_BF16=OFF
+          OPENBLAS_PATH: ${{ github.workspace }}/apps/screenpipe-app-tauri/src-tauri/openblas
         run: bunx tauri build --verbose --target ${{ matrix.target }} --features official-build
 
       - name: Build (with codesign retry)
@@ -983,25 +986,34 @@ jobs:
             local r2_key="${bucket_path#*/}"
             local bucket="${bucket_path%%/*}"
 
-            # Try aws cli first (2 attempts)
-            for attempt in 1 2; do
-              if aws s3 cp "$src" "$dst" --endpoint-url "$R2_ENDPOINT" 2>&1; then
+            # Try aws cli — set 500MB multipart threshold to force single-part upload
+            for attempt in 1 2 3; do
+              if AWS_MAX_ATTEMPTS=3 aws s3 cp "$src" "$dst" \
+                  --endpoint-url "$R2_ENDPOINT" \
+                  --no-progress \
+                  --expected-size "$(stat -f%z "$src" 2>/dev/null || stat -c%s "$src" 2>/dev/null)" \
+                  --cli-read-timeout 300 --cli-connect-timeout 30 \
+                  --region auto 2>&1; then
                 echo "  ✅ $(basename "$src") (aws)"
                 return 0
               fi
               echo "  ⚠️ aws attempt $attempt failed for $(basename "$src")"
-              sleep 5
+              sleep $((attempt * 5))
             done
 
-            # Fallback: presigned URL + curl (macOS SecureTransport TLS)
-            echo "  🔄 falling back to curl for $(basename "$src")..."
+            # Fallback: use aws s3api put-object (single PUT, no multipart chunking)
+            echo "  🔄 falling back to s3api put-object for $(basename "$src")..."
             for attempt in 1 2 3; do
-              PRESIGNED=$(aws s3 presign "$dst" --endpoint-url "$R2_ENDPOINT" --expires-in 3600 2>/dev/null)
-              if [ -n "$PRESIGNED" ] && curl --retry 3 --retry-delay 5 -sf -T "$src" "$PRESIGNED" 2>&1; then
-                echo "  ✅ $(basename "$src") (curl)"
+              if aws s3api put-object \
+                  --endpoint-url "$R2_ENDPOINT" \
+                  --bucket screenpipe-releases \
+                  --key "$r2_key" \
+                  --body "$src" \
+                  --cli-read-timeout 600 --cli-connect-timeout 30 2>&1; then
+                echo "  ✅ $(basename "$src") (s3api)"
                 return 0
               fi
-              echo "  ⚠️ curl attempt $attempt failed for $(basename "$src")"
+              echo "  ⚠️ s3api attempt $attempt failed for $(basename "$src")"
               sleep $((attempt * 10))
             done
             echo "  ❌ failed to upload $(basename "$src") after all attempts"

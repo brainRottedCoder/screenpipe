@@ -437,7 +437,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "claude-haiku-4-5".to_string(),
             provider: None,
-            preset: None,
+            preset: vec![],
             config: std::collections::HashMap::new(),
             allow_apps: vec!["Slack".to_string()],
             deny_apps: vec!["1Password".to_string()],
@@ -450,6 +450,7 @@ mod tests {
             allow_raw_sql: false, // explicit deny
             allow_frames: true,
             connections: vec![],
+            timeout: None,
         };
         let perms = PipePermissions::from_config(&config);
         assert_eq!(perms.allow_apps, vec!["slack"]);
@@ -472,7 +473,7 @@ mod tests {
             agent: "pi".to_string(),
             model: "claude-haiku-4-5".to_string(),
             provider: None,
-            preset: None,
+            preset: vec![],
             config: std::collections::HashMap::new(),
             allow_apps: vec![],
             deny_apps: vec![],
@@ -485,6 +486,7 @@ mod tests {
             allow_raw_sql: true,
             allow_frames: true,
             connections: vec![],
+            timeout: None,
         };
         let perms = PipePermissions::from_config(&config);
         // all permissions default to allow — no restrictions
