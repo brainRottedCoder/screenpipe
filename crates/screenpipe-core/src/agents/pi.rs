@@ -96,17 +96,6 @@ impl PiExecutor {
 
     /// Ensure screenpipe skills exist in `project_dir/.pi/skills/`.
     pub fn ensure_screenpipe_skill(project_dir: &Path) -> Result<()> {
-        let skills: &[(&str, &str)] = &[
-            (
-                "screenpipe-api",
-                include_str!("../../assets/skills/screenpipe-api/SKILL.md"),
-            ),
-            (
-                "screenpipe-cli",
-                include_str!("../../assets/skills/screenpipe-cli/SKILL.md"),
-            ),
-        ];
-
         // Clean up deprecated skills from the 8→2 consolidation.
         // Only removes known old names so user-created skills are preserved.
         let deprecated = [
@@ -129,14 +118,7 @@ impl PiExecutor {
             }
         }
 
-        for (name, content) in skills {
-            let skill_dir = skills_root.join(name);
-            let skill_path = skill_dir.join("SKILL.md");
-
-            std::fs::create_dir_all(&skill_dir)?;
-            std::fs::write(&skill_path, content)?;
-            debug!("{} skill installed at {:?}", name, skill_path);
-        }
+        crate::skills::ensure_core_skills(project_dir)?;
 
         Ok(())
     }
@@ -179,14 +161,29 @@ impl PiExecutor {
 
         let all_skills: &[(&str, &str, Box<dyn Fn(&PipePermissions) -> bool>)] = &[
             (
-                "screenpipe-api",
-                include_str!("../../assets/skills/screenpipe-api/SKILL.md"),
-                Box::new(|_| true), // always installed — unified API skill
+                "screenpipe-search",
+                include_str!("../../assets/skills/screenpipe-search/SKILL.md"),
+                Box::new(|_| true), // always installed — search capability
             ),
             (
-                "screenpipe-cli",
-                include_str!("../../assets/skills/screenpipe-cli/SKILL.md"),
-                Box::new(|_| true), // always installed — pipe & connection management
+                "screenpipe-analytics",
+                include_str!("../../assets/skills/screenpipe-analytics/SKILL.md"),
+                Box::new(|_| true), // always installed — SQL analytics capability
+            ),
+            (
+                "screenpipe-elements",
+                include_str!("../../assets/skills/screenpipe-elements/SKILL.md"),
+                Box::new(|_| true), // always installed — UI elements capability
+            ),
+            (
+                "screenpipe-media",
+                include_str!("../../assets/skills/screenpipe-media/SKILL.md"),
+                Box::new(|_| true), // always installed — media export capability
+            ),
+            (
+                "screenpipe-retranscribe",
+                include_str!("../../assets/skills/screenpipe-retranscribe/SKILL.md"),
+                Box::new(|_| true), // always installed — retranscription capability
             ),
         ];
 
