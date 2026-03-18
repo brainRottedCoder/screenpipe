@@ -15,6 +15,7 @@ pub mod pipe_store;
 pub mod power;
 pub mod retranscribe;
 pub mod search;
+pub mod skills;
 pub mod speakers;
 pub mod streaming;
 pub mod time;
