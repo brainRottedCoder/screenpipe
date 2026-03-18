@@ -48,6 +48,7 @@ import { useAutoSuggestions } from "@/lib/hooks/use-auto-suggestions";
 import { SummaryCards } from "@/components/chat/summary-cards";
 import { type CustomTemplate } from "@/lib/summary-templates";
 import { usePipes } from "@/lib/hooks/use-pipes";
+import { SkillsPanel } from "@/components/skills-panel";
 
 const SCREENPIPE_API = "http://localhost:3030";
 const PI_CHAT_SESSION = "chat";
@@ -842,6 +843,7 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
   };
 
   const [input, setInput] = useState("");
+  const [showSkills, setShowSkills] = useState(false);
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -896,6 +898,7 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
 
   // Follow-up suggestions state (TikTok-style)
   const [followUpSuggestions, setFollowUpSuggestions] = useState<string[]>([]);
+
   const followUpAbortRef = useRef<AbortController | null>(null);
   const followUpFiredRef = useRef(false);
   const lastUserMessageRef = useRef<string>("");
@@ -975,6 +978,12 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
     setPastedImages,
     settings,
   });
+
+  const handleOpenConnections = useCallback(() => {
+    setShowSkills(false);
+    setShowHistory(false);
+    window.location.assign("/home?section=connections");
+  }, [setShowHistory]);
 
   // Read an image file by path and append it to pastedImages (base64 data URL)
   const loadImageFromPath = useCallback(async (filePath: string) => {
@@ -2836,6 +2845,20 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
           <span className="hidden sm:inline">History</span>
         </Button>
         <Button
+          variant={showSkills ? "secondary" : "ghost"}
+          size="sm"
+          onClick={(e) => {
+            e.stopPropagation();
+            setShowSkills(!showSkills);
+            if (!showSkills) setShowHistory(false); // Close history if opening skills
+          }}
+          className="h-7 px-2 gap-1 text-xs"
+          title="Pi Skills"
+        >
+          <Zap size={14} />
+          <span className="hidden sm:inline">Skills</span>
+        </Button>
+        <Button
           variant="default"
           size="sm"
           onClick={async (e) => {
@@ -2965,6 +2988,16 @@ export function StandaloneChat({ className }: { className?: string } = {}) {
                 )}
               </div>
             </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Skills Panel */}
+        <AnimatePresence>
+          {showSkills && (
+            <SkillsPanel
+              onClose={() => setShowSkills(false)}
+              onOpenConnections={handleOpenConnections}
+            />
           )}
         </AnimatePresence>
 
