@@ -1,0 +1,12 @@
+{
+  "name": "browser-tools",
+  "title": "Browser Tools",
+  "description": "Use sandboxed browser sessions copied from local Chromium profiles for zero-setup authentication",
+  "icon": "🧭",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": null,
+  "browser": true,
+  "tags": ["browser", "auth", "automation"]
+}

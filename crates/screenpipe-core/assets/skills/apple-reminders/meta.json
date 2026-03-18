@@ -1,0 +1,11 @@
+{
+  "name": "apple-reminders",
+  "title": "Apple Reminders",
+  "description": "Create, complete, and list Apple Reminders via AppleScript",
+  "icon": "🔔",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": "apple-reminders",
+  "tags": ["productivity", "apple", "reminders"]
+}

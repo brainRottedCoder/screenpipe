@@ -1,0 +1,11 @@
+{
+  "name": "email",
+  "title": "Email",
+  "description": "Send emails from Pi using a configured connection",
+  "icon": "✉️",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": "email",
+  "tags": ["email", "communication"]
+}

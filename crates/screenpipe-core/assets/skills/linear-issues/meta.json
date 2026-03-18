@@ -1,0 +1,11 @@
+{
+  "name": "linear-issues",
+  "title": "Linear Issues",
+  "description": "Create and update Linear issues from Pi",
+  "icon": "📋",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": "linear",
+  "tags": ["linear", "issues", "productivity"]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "apple-calendar",
+  "title": "Apple Calendar",
+  "description": "Create, read, update, and delete Apple Calendar events via AppleScript",
+  "icon": "📅",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": "apple-calendar",
+  "tags": ["productivity", "apple", "calendar"]
+}

@@ -1,0 +1,11 @@
+{
+  "name": "slack-messages",
+  "title": "Slack Messages",
+  "description": "Search and send Slack messages via Slack API",
+  "icon": "💬",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": "slack",
+  "tags": ["productivity", "messaging", "slack"]
+}

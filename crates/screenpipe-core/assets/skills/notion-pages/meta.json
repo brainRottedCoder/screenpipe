@@ -1,0 +1,11 @@
+{
+  "name": "notion-pages",
+  "title": "Notion Pages",
+  "description": "Create and update Notion pages from Pi",
+  "icon": "📝",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": "notion",
+  "tags": ["notion", "docs", "productivity"]
+}

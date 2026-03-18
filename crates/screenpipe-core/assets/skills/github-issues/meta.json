@@ -1,0 +1,11 @@
+{
+  "name": "github-issues",
+  "title": "GitHub Issues",
+  "description": "Create and manage GitHub issues via GitHub API",
+  "icon": "🐙",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "requires_connection": "github",
+  "tags": ["developer", "github", "issues"]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "web-search",
+  "title": "Web Search",
+  "description": "Search the web for current information, news, and facts",
+  "icon": "🌐",
+  "tier": "official",
+  "version": "1.0.0",
+  "author": "screenpipe",
+  "tags": ["search", "web", "research"]
+}
