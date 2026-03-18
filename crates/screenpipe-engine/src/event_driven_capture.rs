@@ -410,7 +410,8 @@ pub async fn event_driven_capture_loop(
                 // for this device, reference that frame's elements instead of
                 // inserting duplicate element rows.
                 let elements_ref = if let Some(hash) = last_content_hash {
-                    if let Some(&(prev_frame_id, prev_hash)) = last_elements_cache.get(&device_name) {
+                    if let Some(&(prev_frame_id, prev_hash)) = last_elements_cache.get(&device_name)
+                    {
                         if hash == prev_hash && hash != 0 {
                             Some(prev_frame_id)
                         } else {
@@ -473,10 +474,8 @@ pub async fn event_driven_capture_loop(
                             // (not when we referenced another frame's elements)
                             if !output.elements_deduped {
                                 if let Some(hash) = result.content_hash {
-                                    last_elements_cache.insert(
-                                        device_name.clone(),
-                                        (result.frame_id, hash),
-                                    );
+                                    last_elements_cache
+                                        .insert(device_name.clone(), (result.frame_id, hash));
                                 }
                             }
 

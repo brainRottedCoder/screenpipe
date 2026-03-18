@@ -67,9 +67,7 @@ pub enum CallSignal {
     /// Match a menu bar item by exact title (case-insensitive).
     /// Used for apps like Zoom that expose meeting controls only via
     /// AXMenuBarItem/AXMenuItem in the menu bar, not as AXButton in windows.
-    MenuBarItem {
-        title_contains: &'static str,
-    },
+    MenuBarItem { title_contains: &'static str },
     /// Match an AXMenuItem by its automation ID (AXIdentifier).
     /// Zoom exposes identifiers like "onMuteAudio:", "onMuteVideo:" on menu items.
     MenuItemId(&'static str),
@@ -449,8 +447,14 @@ impl MeetingUiScanner {
 
                     // Walk this window's AX tree looking for signals
                     walk_for_signals(
-                        window, &precomputed, 0, max_depth, &start, scan_timeout,
-                        &mut found, min_required,
+                        window,
+                        &precomputed,
+                        0,
+                        max_depth,
+                        &start,
+                        scan_timeout,
+                        &mut found,
+                        min_required,
                     );
 
                     if found.len() >= min_required {
@@ -608,7 +612,8 @@ fn walk_for_signals(
             desc_lower.as_deref(),
             ident_lower.as_deref(),
         ) {
-            let label = format_signal_match(&ps.signal, &role_str, title.as_deref(), desc.as_deref());
+            let label =
+                format_signal_match(&ps.signal, &role_str, title.as_deref(), desc.as_deref());
             if !found.contains(&label) {
                 found.push(label);
             }
@@ -639,7 +644,14 @@ fn walk_for_signals(
             }
             let child = &children[i];
             walk_for_signals(
-                child, signals, depth + 1, max_depth, start, timeout, found, min_required,
+                child,
+                signals,
+                depth + 1,
+                max_depth,
+                start,
+                timeout,
+                found,
+                min_required,
             );
         }
     }
@@ -897,7 +909,11 @@ fn windows_enumerate_processes() -> Vec<WindowsProcessInfo> {
         if Process32FirstW(snapshot, &mut entry).is_ok() {
             loop {
                 let name = String::from_utf16_lossy(
-                    &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len())]
+                    &entry.szExeFile[..entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len())],
                 );
                 results.push(WindowsProcessInfo {
                     pid: entry.th32ProcessID,
@@ -927,11 +943,11 @@ fn windows_get_process_name(pid: i32) -> Option<String> {
 /// Enumerate visible window titles and their PIDs on Windows.
 #[cfg(target_os = "windows")]
 fn windows_enumerate_window_titles() -> Vec<(i32, String)> {
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     };
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use std::sync::Mutex;
 
     let results: Arc<Mutex<Vec<(i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = results.clone();
@@ -961,7 +977,10 @@ fn windows_enumerate_window_titles() -> Vec<(i32, String)> {
         );
     }
 
-    Arc::try_unwrap(results).unwrap_or_default().into_inner().unwrap_or_default()
+    Arc::try_unwrap(results)
+        .unwrap_or_default()
+        .into_inner()
+        .unwrap_or_default()
 }
 
 /// Scan a process's windows via Windows UI Automation for call control signals.
@@ -973,6 +992,8 @@ fn windows_scan_process_uia(
     max_depth: usize,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
@@ -980,8 +1001,6 @@ fn windows_scan_process_uia(
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
     };
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use std::sync::Mutex;
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
@@ -998,8 +1017,7 @@ fn windows_scan_process_uia(
         let param_data = (target_pid, Mutex::new(Vec::<HWND>::new()));
 
         unsafe extern "system" fn enum_for_pid(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            let (target_pid, hwnds) =
-                &*(lparam.0 as *const (u32, Mutex<Vec<HWND>>));
+            let (target_pid, hwnds) = &*(lparam.0 as *const (u32, Mutex<Vec<HWND>>));
 
             if IsWindowVisible(hwnd).as_bool() {
                 let mut win_pid: u32 = 0;
@@ -1034,8 +1052,15 @@ fn windows_scan_process_uia(
             };
 
             windows_walk_uia(
-                &walker, &element, signals, 0, max_depth,
-                &start, timeout, &mut found, min_required,
+                &walker,
+                &element,
+                signals,
+                0,
+                max_depth,
+                &start,
+                timeout,
+                &mut found,
+                min_required,
             );
         }
 
@@ -1078,30 +1103,40 @@ unsafe fn windows_walk_uia(
 
     for signal in signals {
         let matched = match signal {
-            CallSignal::AutomationId(id) => {
-                automation_id.as_deref().map_or(false, |a| a == *id)
-            }
-            CallSignal::AutomationIdContains(substr) => {
-                automation_id.as_deref().map_or(false, |a| {
-                    a.to_lowercase().contains(&substr.to_lowercase())
-                })
-            }
+            CallSignal::AutomationId(id) => automation_id.as_deref().map_or(false, |a| a == *id),
+            CallSignal::AutomationIdContains(substr) => automation_id
+                .as_deref()
+                .map_or(false, |a| a.to_lowercase().contains(&substr.to_lowercase())),
             CallSignal::KeyboardShortcut(shortcut) => {
                 let s_lower = shortcut.to_lowercase();
-                help_text.as_deref().map_or(false, |h| h.to_lowercase().contains(&s_lower))
-                    || accel_key.as_deref().map_or(false, |a| a.to_lowercase().contains(&s_lower))
-                    || name.as_deref().map_or(false, |n| n.to_lowercase().contains(&s_lower))
+                help_text
+                    .as_deref()
+                    .map_or(false, |h| h.to_lowercase().contains(&s_lower))
+                    || accel_key
+                        .as_deref()
+                        .map_or(false, |a| a.to_lowercase().contains(&s_lower))
+                    || name
+                        .as_deref()
+                        .map_or(false, |n| n.to_lowercase().contains(&s_lower))
             }
-            CallSignal::RoleWithName { role: r, name_contains } => {
+            CallSignal::RoleWithName {
+                role: r,
+                name_contains,
+            } => {
                 let expected = r.strip_prefix("AX").unwrap_or(r);
-                let role_matches = role == *r || ax_role == *r || role == expected
+                let role_matches = role == *r
+                    || ax_role == *r
+                    || role == expected
                     || role_lower == expected.to_lowercase();
                 if !role_matches {
                     false
                 } else {
                     let needle = name_contains.to_lowercase();
-                    name.as_deref().map_or(false, |n| n.to_lowercase().contains(&needle))
-                        || help_text.as_deref().map_or(false, |h| h.to_lowercase().contains(&needle))
+                    name.as_deref()
+                        .map_or(false, |n| n.to_lowercase().contains(&needle))
+                        || help_text
+                            .as_deref()
+                            .map_or(false, |h| h.to_lowercase().contains(&needle))
                 }
             }
             CallSignal::MenuBarItem { title_contains } => {
@@ -1112,12 +1147,17 @@ unsafe fn windows_walk_uia(
             }
             CallSignal::MenuItemId(expected_id) => {
                 (role_lower == "menu item" || role_lower == "menuitem")
-                    && automation_id.as_deref().map_or(false, |a| a == *expected_id)
+                    && automation_id
+                        .as_deref()
+                        .map_or(false, |a| a == *expected_id)
             }
             CallSignal::NameContains(needle) => {
                 let n_lower = needle.to_lowercase();
-                name.as_deref().map_or(false, |n| n.to_lowercase().contains(&n_lower))
-                    || help_text.as_deref().map_or(false, |h| h.to_lowercase().contains(&n_lower))
+                name.as_deref()
+                    .map_or(false, |n| n.to_lowercase().contains(&n_lower))
+                    || help_text
+                        .as_deref()
+                        .map_or(false, |h| h.to_lowercase().contains(&n_lower))
             }
         };
 
@@ -1134,15 +1174,26 @@ unsafe fn windows_walk_uia(
     }
 
     // Skip content areas
-    if role_lower == "edit" || role_lower == "document" || role_lower == "text" || role_lower == "list" {
+    if role_lower == "edit"
+        || role_lower == "document"
+        || role_lower == "text"
+        || role_lower == "list"
+    {
         return;
     }
 
     // Walk children
     if let Ok(child) = walker.GetFirstChildElement(element) {
         windows_walk_uia(
-            walker, &child, signals, depth + 1, max_depth,
-            start, timeout, found, min_required,
+            walker,
+            &child,
+            signals,
+            depth + 1,
+            max_depth,
+            start,
+            timeout,
+            found,
+            min_required,
         );
 
         let mut current = child;
@@ -1150,8 +1201,15 @@ unsafe fn windows_walk_uia(
             match walker.GetNextSiblingElement(&current) {
                 Ok(next) => {
                     windows_walk_uia(
-                        walker, &next, signals, depth + 1, max_depth,
-                        start, timeout, found, min_required,
+                        walker,
+                        &next,
+                        signals,
+                        depth + 1,
+                        max_depth,
+                        start,
+                        timeout,
+                        found,
+                        min_required,
                     );
                     current = next;
                 }
@@ -1365,7 +1423,8 @@ pub fn advance_state(
             } else {
                 debug!(
                     "meeting v2: Ending (app={}, id={}, elapsed={:?})",
-                    app, meeting_id,
+                    app,
+                    meeting_id,
                     since.elapsed()
                 );
                 (
@@ -1492,10 +1551,7 @@ pub fn find_running_meeting_apps(
                 if !profile.app_identifiers.browser_url_patterns.is_empty()
                     && BROWSER_NAMES.iter().any(|b| name_lower.contains(b))
                 {
-                    if has_browser_meeting_url(
-                        pid,
-                        &profile.app_identifiers.browser_url_patterns,
-                    ) {
+                    if has_browser_meeting_url(pid, &profile.app_identifiers.browser_url_patterns) {
                         results.push(RunningMeetingApp {
                             pid,
                             app_name: name.clone(),
@@ -1571,14 +1627,12 @@ pub fn find_running_meeting_apps(
     profiles: &[MeetingDetectionProfile],
     currently_tracking: Option<&ActiveTracking>,
 ) -> Vec<RunningMeetingApp> {
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
+    use std::collections::{HashMap, HashSet};
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     };
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use std::collections::{HashMap, HashSet};
 
     let mut results = Vec::new();
     let mut seen_pids = HashSet::new();
@@ -1591,7 +1645,8 @@ pub fn find_running_meeting_apps(
         if process_map.iter().any(|p| p.pid == tracking.pid as u32) {
             results.push(RunningMeetingApp {
                 pid: tracking.pid,
-                app_name: process_map.iter()
+                app_name: process_map
+                    .iter()
                     .find(|p| p.pid == tracking.pid as u32)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| format!("pid:{}", tracking.pid)),
@@ -1628,8 +1683,13 @@ pub fn find_running_meeting_apps(
     let window_titles = windows_enumerate_window_titles();
 
     let browser_process_names: &[&str] = &[
-        "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
-        "arc.exe", "opera.exe", "vivaldi.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "arc.exe",
+        "opera.exe",
+        "vivaldi.exe",
     ];
 
     for (idx, profile) in profiles.iter().enumerate() {
@@ -1643,20 +1703,24 @@ pub fn find_running_meeting_apps(
             }
 
             // Check if this is a browser process
-            let proc_name = process_map.iter()
+            let proc_name = process_map
+                .iter()
                 .find(|p| p.pid == *pid as u32)
                 .map(|p| p.name.to_lowercase());
-            let is_browser = proc_name.as_ref().map_or(false, |n| {
-                browser_process_names.iter().any(|b| n == *b)
-            });
+            let is_browser = proc_name
+                .as_ref()
+                .map_or(false, |n| browser_process_names.iter().any(|b| n == *b));
             if !is_browser {
                 continue;
             }
 
             let title_lower = title.to_lowercase();
-            if profile.app_identifiers.browser_url_patterns.iter().any(|p| {
-                title_lower.contains(&p.to_lowercase())
-            }) {
+            if profile
+                .app_identifiers
+                .browser_url_patterns
+                .iter()
+                .any(|p| title_lower.contains(&p.to_lowercase()))
+            {
                 results.push(RunningMeetingApp {
                     pid: *pid,
                     app_name: proc_name.unwrap_or_default(),
@@ -1780,9 +1844,7 @@ pub async fn run_meeting_detection_loop(
             let (new_state, ended_id) = handle_no_apps_running(state);
             state = new_state;
             if let Some(meeting_id) = ended_id {
-                let now = Utc::now()
-                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                    .to_string();
+                let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
                 if let Err(e) = db.end_meeting(meeting_id, &now).await {
                     error!("meeting v2: failed to end meeting {}: {}", meeting_id, e);
                 }
@@ -1841,19 +1903,13 @@ pub async fn run_meeting_detection_loop(
                                 recent.id
                             }
                             Err(e) => {
-                                warn!(
-                                    "meeting v2: failed to reopen meeting {}: {}",
-                                    recent.id, e
-                                );
+                                warn!("meeting v2: failed to reopen meeting {}: {}", recent.id, e);
                                 insert_new_meeting(&db, &app).await
                             }
                         },
                         Ok(None) => insert_new_meeting(&db, &app).await,
                         Err(e) => {
-                            warn!(
-                                "meeting v2: failed to find recent meeting: {}",
-                                e
-                            );
+                            warn!("meeting v2: failed to find recent meeting: {}", e);
                             insert_new_meeting(&db, &app).await
                         }
                     };
@@ -1880,18 +1936,13 @@ pub async fn run_meeting_detection_loop(
                 }
                 StateAction::EndMeeting { meeting_id } => {
                     if meeting_id >= 0 {
-                        let now = Utc::now()
-                            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                            .to_string();
+                        let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
                         match db.end_meeting(meeting_id, &now).await {
                             Ok(()) => {
                                 info!("meeting v2: meeting ended (id={})", meeting_id);
                             }
                             Err(e) => {
-                                error!(
-                                    "meeting v2: failed to end meeting {}: {}",
-                                    meeting_id, e
-                                );
+                                error!("meeting v2: failed to end meeting {}: {}", meeting_id, e);
                             }
                         }
                     }
@@ -2063,9 +2114,7 @@ mod tests {
                 CallSignal::RoleWithName { name_contains, .. } => {
                     !name_contains.to_lowercase().contains("mute")
                 }
-                CallSignal::AutomationIdContains(s) => {
-                    !s.to_lowercase().contains("mute")
-                }
+                CallSignal::AutomationIdContains(s) => !s.to_lowercase().contains("mute"),
                 _ => true,
             });
             assert!(
@@ -2202,9 +2251,7 @@ mod tests {
             let mute_matches: Vec<_> = profile
                 .call_signals
                 .iter()
-                .filter(|s| {
-                    check_signal_match(s, "AXButton", Some("Mute"), None, None)
-                })
+                .filter(|s| check_signal_match(s, "AXButton", Some("Mute"), None, None))
                 .collect();
             // If mute is a signal, verify that other non-mute signals also exist
             // (so a lobby with only Mute won't trigger detection)
@@ -2319,10 +2366,7 @@ mod tests {
 
         assert!(matches!(
             new_state,
-            MeetingState::Active {
-                meeting_id: 42,
-                ..
-            }
+            MeetingState::Active { meeting_id: 42, .. }
         ));
         assert!(action.is_none());
     }
@@ -2340,10 +2384,7 @@ mod tests {
 
         assert!(matches!(
             new_state,
-            MeetingState::Ending {
-                meeting_id: 42,
-                ..
-            }
+            MeetingState::Ending { meeting_id: 42, .. }
         ));
         assert!(action.is_none());
     }
@@ -2389,10 +2430,7 @@ mod tests {
 
         assert!(matches!(
             new_state,
-            MeetingState::Active {
-                meeting_id: 42,
-                ..
-            }
+            MeetingState::Active { meeting_id: 42, .. }
         ));
         assert!(action.is_none());
     }
@@ -2429,10 +2467,7 @@ mod tests {
 
         assert!(matches!(
             new_state,
-            MeetingState::Ending {
-                meeting_id: 42,
-                ..
-            }
+            MeetingState::Ending { meeting_id: 42, .. }
         ));
         assert!(action.is_none());
     }
@@ -2711,7 +2746,10 @@ mod tests {
             .expect("Zoom profile not found");
 
         let has_menu_bar = zoom.call_signals.iter().any(|s| {
-            matches!(s, CallSignal::MenuBarItem { .. } | CallSignal::MenuItemId(_))
+            matches!(
+                s,
+                CallSignal::MenuBarItem { .. } | CallSignal::MenuItemId(_)
+            )
         });
         assert!(
             has_menu_bar,

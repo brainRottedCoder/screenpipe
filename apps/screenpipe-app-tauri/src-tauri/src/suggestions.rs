@@ -1018,9 +1018,7 @@ fn parse_ai_response(content: &str) -> Option<AiResult> {
     // Fallback: try parsing as a plain JSON array of strings (old format)
     if let Some(start) = content.find('[') {
         if let Some(end) = content.rfind(']') {
-            if start <= end
-                && content.is_char_boundary(start)
-                && content.is_char_boundary(end + 1)
+            if start <= end && content.is_char_boundary(start) && content.is_char_boundary(end + 1)
             {
                 if let Ok(arr) = serde_json::from_str::<Vec<String>>(&content[start..=end]) {
                     if !arr.is_empty() {
@@ -1427,7 +1425,9 @@ mod tests {
                 println!(
                     "    [{}] {}...",
                     speaker,
-                    &a.transcription[..a.transcription.floor_char_boundary(a.transcription.len().min(80))]
+                    &a.transcription[..a
+                        .transcription
+                        .floor_char_boundary(a.transcription.len().min(80))]
                 );
             }
         }

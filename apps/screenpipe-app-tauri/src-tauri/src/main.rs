@@ -105,8 +105,8 @@ use base64::Engine;
 use health::start_health_check;
 use log_files::{get_log_files, get_screenpipe_data_dir};
 use shortcuts::{
-    initialize_global_shortcuts, resume_global_shortcuts,
-    suspend_global_shortcuts, update_global_shortcuts,
+    initialize_global_shortcuts, resume_global_shortcuts, suspend_global_shortcuts,
+    update_global_shortcuts,
 };
 use vault::{vault_status, vault_unlock};
 use window::RewindWindowId;
@@ -569,6 +569,7 @@ async fn main() {
                 commands::copy_frame_to_clipboard,
                 commands::copy_deeplink_to_clipboard,
                 commands::copy_text_to_clipboard,
+                commands::sync_browser_profile,
                 // Rollback commands
                 commands::rollback_to_version,
                 // Commands from tray.rs
@@ -799,6 +800,7 @@ async fn main() {
             commands::copy_frame_to_clipboard,
             commands::copy_deeplink_to_clipboard,
             commands::copy_text_to_clipboard,
+            commands::sync_browser_profile,
             // Overlay commands (Windows)
             commands::enable_overlay_click_through,
             commands::disable_overlay_click_through,
@@ -1649,7 +1651,8 @@ async fn main() {
                                 }
                             }
                         })
-                    }).join();
+                    })
+                    .join();
 
                     // Cleanup Pi sidecar
                     let app_handle_pi = app_handle.app_handle().clone();

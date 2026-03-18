@@ -505,10 +505,7 @@ impl SettingsStore {
             // still opt back in manually from Settings; once they've seen this
             // version, we stop overriding their choice.
             if !obj.contains_key("restartNotificationsDefaultedOff") {
-                obj.insert(
-                    "showRestartNotifications".to_string(),
-                    Value::Bool(false),
-                );
+                obj.insert("showRestartNotifications".to_string(), Value::Bool(false));
                 obj.insert(
                     "restartNotificationsDefaultedOff".to_string(),
                     Value::Bool(true),
@@ -825,8 +822,7 @@ impl PipeSuggestionsSettingsStore {
         if store.is_empty() {
             return Ok(None);
         }
-        let settings =
-            serde_json::from_value(store.get("pipe_suggestions").unwrap_or(Value::Null));
+        let settings = serde_json::from_value(store.get("pipe_suggestions").unwrap_or(Value::Null));
         match settings {
             Ok(settings) => Ok(settings),
             Err(_) => Ok(None),
@@ -839,4 +835,3 @@ impl PipeSuggestionsSettingsStore {
         store.save().map_err(|e| e.to_string())
     }
 }
-

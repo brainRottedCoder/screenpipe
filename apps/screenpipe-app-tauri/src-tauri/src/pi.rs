@@ -391,10 +391,7 @@ impl PiManager {
     ) -> Result<oneshot::Receiver<RpcResponse>, String> {
         let req_id = self.send_command_inner(command)?;
         let (tx, rx) = oneshot::channel();
-        self.pending_responses
-            .lock()
-            .unwrap()
-            .insert(req_id, tx);
+        self.pending_responses.lock().unwrap().insert(req_id, tx);
         // Caller awaits `rx` with a timeout
         let _ = timeout; // timeout is applied by the caller via tokio::time::timeout
         Ok(rx)
@@ -616,10 +613,22 @@ fn find_pi_executable() -> Option<String> {
 
 /// Ensure the screenpipe skills exist in the project's .pi/skills directory.
 /// Delegates to screenpipe-core's canonical implementation.
+/// Also ensures meta.json files are created for core skills.
 fn ensure_screenpipe_skill(project_dir: &str) -> Result<(), String> {
     use screenpipe_core::agents::pi::PiExecutor;
-    PiExecutor::ensure_screenpipe_skill(std::path::Path::new(project_dir))
-        .map_err(|e| format!("Failed to install screenpipe skills: {}", e))
+    use screenpipe_core::skills::ensure_core_skills;
+
+    let path = std::path::Path::new(project_dir);
+
+    // Ensure old-style SKILL.md files exist
+    PiExecutor::ensure_screenpipe_skill(path)
+        .map_err(|e| format!("Failed to install screenpipe skills: {}", e))?;
+
+    // Also ensure meta.json files exist for core skills (new skill management)
+    ensure_core_skills(path)
+        .map_err(|e| format!("Failed to ensure core skills metadata: {}", e))?;
+
+    Ok(())
 }
 
 /// Ensure the web-search extension exists in the project's .pi/extensions directory
@@ -1307,10 +1316,7 @@ pub async fn pi_start_inner(
     }
 
     // Grab queue_state for the stdout reader before dropping the lock
-    let queue_state_for_reader = pool
-        .sessions
-        .get(&sid)
-        .and_then(|m| m.queue_state.clone());
+    let queue_state_for_reader = pool.sessions.get(&sid).and_then(|m| m.queue_state.clone());
 
     // Snapshot the state BEFORE dropping the lock, so we don't hold it during I/O
     let snapshot = match pool.sessions.get_mut(&sid) {
@@ -1378,7 +1384,9 @@ pub async fn pi_start_inner(
                         if let Some(id) = event.get("id").and_then(|v| v.as_str()) {
                             let mut pending = pending_for_reader.lock().unwrap();
                             if let Some(tx) = pending.remove(id) {
-                                if let Ok(rpc) = serde_json::from_value::<RpcResponse>(event.clone()) {
+                                if let Ok(rpc) =
+                                    serde_json::from_value::<RpcResponse>(event.clone())
+                                {
                                     let _ = tx.send(rpc);
                                 }
                             }
@@ -1520,7 +1528,9 @@ pub async fn pi_prompt(
             return Err("Pi is not running".to_string());
         }
         m.last_activity = std::time::Instant::now();
-        m.queue_handle.clone().ok_or("Pi command queue not initialized")?
+        m.queue_handle
+            .clone()
+            .ok_or("Pi command queue not initialized")?
     };
 
     let mut cmd = json!({
@@ -1536,7 +1546,8 @@ pub async fn pi_prompt(
     let rx = queue
         .send(cmd, crate::pi_command_queue::WaitMode::StreamThenWaitDone)
         .await?;
-    rx.await.map_err(|_| "Pi command queue dropped".to_string())?
+    rx.await
+        .map_err(|_| "Pi command queue dropped".to_string())?
 }
 
 /// Abort current Pi operation. Priority command — cancels all pending commands
@@ -1552,7 +1563,9 @@ pub async fn pi_abort(state: State<'_, PiState>, session_id: Option<String>) -> 
             return Err("Pi is not running".to_string());
         }
         m.last_activity = std::time::Instant::now();
-        m.queue_handle.clone().ok_or("Pi command queue not initialized")?
+        m.queue_handle
+            .clone()
+            .ok_or("Pi command queue not initialized")?
     };
     queue.abort().await
 }
@@ -1574,7 +1587,9 @@ pub async fn pi_new_session(
             return Err("Pi is not running".to_string());
         }
         m.last_activity = std::time::Instant::now();
-        m.queue_handle.clone().ok_or("Pi command queue not initialized")?
+        m.queue_handle
+            .clone()
+            .ok_or("Pi command queue not initialized")?
     };
     let rx = queue
         .send(
@@ -1582,7 +1597,8 @@ pub async fn pi_new_session(
             crate::pi_command_queue::WaitMode::WaitDone,
         )
         .await?;
-    rx.await.map_err(|_| "Pi command queue dropped".to_string())?
+    rx.await
+        .map_err(|_| "Pi command queue dropped".to_string())?
 }
 
 /// Timeout for RPC responses that must complete before the next command.
@@ -1598,12 +1614,17 @@ async fn await_rpc_response(
             if resp.success == Some(true) {
                 Ok(())
             } else {
-                Err(resp.error.unwrap_or_else(|| format!("{} failed", command_name)))
+                Err(resp
+                    .error
+                    .unwrap_or_else(|| format!("{} failed", command_name)))
             }
         }
         Ok(Err(_)) => {
             // Channel dropped — process likely died
-            Err(format!("Pi process died while waiting for {} response", command_name))
+            Err(format!(
+                "Pi process died while waiting for {} response",
+                command_name
+            ))
         }
         Err(_) => {
             warn!("Timed out waiting for Pi {} response", command_name);

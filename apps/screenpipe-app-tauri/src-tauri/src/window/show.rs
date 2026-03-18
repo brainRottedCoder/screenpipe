@@ -20,15 +20,15 @@ use super::focus::{restore_frontmost_app, restore_frontmost_app_if_external_with
 use super::panel::{main_label_for_mode, MAIN_CREATED_MODE};
 #[cfg(target_os = "macos")]
 use super::panel::{show_panel_visible, MAIN_PANEL_SHOWN};
-use super::util::screen_aware_size;
 #[cfg(target_os = "macos")]
 use super::util::run_on_main_thread_safe;
+use super::util::screen_aware_size;
 
+use tauri::Emitter;
 #[cfg(target_os = "macos")]
 use tauri_nspanel::ManagerExt;
 #[cfg(target_os = "macos")]
 use tauri_nspanel::WebviewWindowExt;
-use tauri::Emitter;
 
 #[derive(PartialEq)]
 pub enum RewindWindowId {
@@ -413,7 +413,8 @@ impl ShowRewindWindow {
 
                 // Reposition to center of primary monitor
                 if let Ok(Some(monitor)) = app.primary_monitor() {
-                    let logical: LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
+                    let logical: LogicalSize<f64> =
+                        monitor.size().to_logical(monitor.scale_factor());
                     let pos = monitor.position();
                     let scale = monitor.scale_factor();
                     let origin_x = pos.x as f64 / scale;
@@ -422,8 +423,12 @@ impl ShowRewindWindow {
                     let bar_h = 80.0;
                     let x = origin_x + (logical.width - bar_w) / 2.0;
                     let y = origin_y + logical.height * 0.22;
-                    window.set_size(Size::Logical(LogicalSize::new(bar_w, bar_h))).ok();
-                    window.set_position(Position::Logical(LogicalPosition::new(x, y))).ok();
+                    window
+                        .set_size(Size::Logical(LogicalSize::new(bar_w, bar_h)))
+                        .ok();
+                    window
+                        .set_position(Position::Logical(LogicalPosition::new(x, y)))
+                        .ok();
                 }
 
                 // Bring to front with high level (already class-swizzled to NSPanel)
@@ -518,8 +523,8 @@ impl ShowRewindWindow {
                     let settings = SettingsStore::get(app)
                         .unwrap_or_default()
                         .unwrap_or_default();
-                    let capturable = crate::config::is_e2e_mode()
-                        || settings.show_overlay_in_screen_recording;
+                    let capturable =
+                        crate::config::is_e2e_mode() || settings.show_overlay_in_screen_recording;
                     let chat_on_top = settings.chat_always_on_top;
                     let app_clone = app.clone();
                     run_on_main_thread_safe(app, move || {
@@ -601,8 +606,8 @@ impl ShowRewindWindow {
                     .unwrap_or_default();
                 let overlay_mode = settings.overlay_mode;
                 #[allow(unused_variables)] // used only on macOS
-                let show_in_recording = crate::config::is_e2e_mode()
-                    || settings.show_overlay_in_screen_recording;
+                let show_in_recording =
+                    crate::config::is_e2e_mode() || settings.show_overlay_in_screen_recording;
                 // Record what mode we're creating so we can detect changes later
                 *MAIN_CREATED_MODE.lock().unwrap_or_else(|e| e.into_inner()) = overlay_mode.clone();
                 let use_window_mode = overlay_mode == "window";
@@ -1196,7 +1201,8 @@ impl ShowRewindWindow {
                 let bar_w = 680.0_f64;
                 let bar_h = 80.0; // input row + footer
                 let (x, y) = if let Ok(Some(monitor)) = app.primary_monitor() {
-                    let logical: LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
+                    let logical: LogicalSize<f64> =
+                        monitor.size().to_logical(monitor.scale_factor());
                     let pos = monitor.position();
                     let scale = monitor.scale_factor();
                     let origin_x = pos.x as f64 / scale;
@@ -1209,30 +1215,28 @@ impl ShowRewindWindow {
                     (200.0, 140.0)
                 };
                 let bar_w = if let Ok(Some(monitor)) = app.primary_monitor() {
-                    let logical: LogicalSize<f64> = monitor.size().to_logical(monitor.scale_factor());
+                    let logical: LogicalSize<f64> =
+                        monitor.size().to_logical(monitor.scale_factor());
                     bar_w.min(logical.width - 40.0)
                 } else {
                     bar_w
                 };
 
-                let builder = WebviewWindow::builder(
-                    app,
-                    self.id().label(),
-                    WebviewUrl::App(url.into()),
-                )
-                .title("")
-                .visible(false) // show after panel conversion
-                .accept_first_mouse(true)
-                .shadow(true)
-                .decorations(false)
-                .transparent(true)
-                .always_on_top(true)
-                .visible_on_all_workspaces(true)
-                .inner_size(bar_w, bar_h)
-                .min_inner_size(400.0, 56.0)
-                .position(x, y)
-                .focused(true)
-                .resizable(true);
+                let builder =
+                    WebviewWindow::builder(app, self.id().label(), WebviewUrl::App(url.into()))
+                        .title("")
+                        .visible(false) // show after panel conversion
+                        .accept_first_mouse(true)
+                        .shadow(true)
+                        .decorations(false)
+                        .transparent(true)
+                        .always_on_top(true)
+                        .visible_on_all_workspaces(true)
+                        .inner_size(bar_w, bar_h)
+                        .min_inner_size(400.0, 56.0)
+                        .position(x, y)
+                        .focused(true)
+                        .resizable(true);
 
                 let window = builder.build()?;
 
@@ -1254,7 +1258,8 @@ impl ShowRewindWindow {
                                 // Do NOT use to_panel() — its Id::from_retained_ptr causes
                                 // use-after-free on window.close() → SIGSEGV
                                 let nspanel_class: id = msg_send![
-                                    tauri_nspanel::raw_nspanel::RawNSPanel::class(), class
+                                    tauri_nspanel::raw_nspanel::RawNSPanel::class(),
+                                    class
                                 ];
                                 object_setClass(ns_win, nspanel_class);
 
@@ -1347,44 +1352,44 @@ impl ShowRewindWindow {
 
                             if let Ok(panel) = window_clone.to_panel() {
                                 let chat_on_top = SettingsStore::get(window_clone.app_handle())
-                                .unwrap_or_default()
-                                .unwrap_or_default()
-                                .chat_always_on_top;
+                                    .unwrap_or_default()
+                                    .unwrap_or_default()
+                                    .chat_always_on_top;
 
-                            if chat_on_top {
-                                // Level 1001 to appear above fullscreen apps
-                                panel.set_level(1001);
-                                // NonActivatingPanel (128) so clicking the chat doesn't
-                                // activate the app (which would switch Spaces away from
-                                // fullscreen apps). Preserve existing style bits.
-                                unsafe {
-                                    let current: i32 = msg_send![&*panel, styleMask];
-                                    panel.set_style_mask(current | 128);
+                                if chat_on_top {
+                                    // Level 1001 to appear above fullscreen apps
+                                    panel.set_level(1001);
+                                    // NonActivatingPanel (128) so clicking the chat doesn't
+                                    // activate the app (which would switch Spaces away from
+                                    // fullscreen apps). Preserve existing style bits.
+                                    unsafe {
+                                        let current: i32 = msg_send![&*panel, styleMask];
+                                        panel.set_style_mask(current | 128);
+                                    }
+                                } else {
+                                    panel.set_level(0);
                                 }
-                            } else {
-                                panel.set_level(0);
-                            }
 
-                            // Don't hide when app deactivates
-                            panel.set_hides_on_deactivate(false);
+                                // Don't hide when app deactivates
+                                panel.set_hides_on_deactivate(false);
 
-                            // Enable dragging by clicking anywhere on the window background
-                            let _: () = unsafe {
-                                msg_send![&*panel, setMovableByWindowBackground: true]
-                            };
+                                // Enable dragging by clicking anywhere on the window background
+                                let _: () = unsafe {
+                                    msg_send![&*panel, setMovableByWindowBackground: true]
+                                };
 
-                            // NSWindowSharingNone=0 hides from screen recorders, NSWindowSharingReadOnly=1 allows capture
-                            let capturable = crate::config::is_e2e_mode()
-                                || SettingsStore::get(window_clone.app_handle())
-                                    .unwrap_or_default()
-                                    .unwrap_or_default()
-                                    .show_overlay_in_screen_recording;
-                            let sharing: u64 = if capturable { 1 } else { 0 };
-                            let _: () = unsafe { msg_send![&*panel, setSharingType: sharing] };
+                                // NSWindowSharingNone=0 hides from screen recorders, NSWindowSharingReadOnly=1 allows capture
+                                let capturable = crate::config::is_e2e_mode()
+                                    || SettingsStore::get(window_clone.app_handle())
+                                        .unwrap_or_default()
+                                        .unwrap_or_default()
+                                        .show_overlay_in_screen_recording;
+                                let sharing: u64 = if capturable { 1 } else { 0 };
+                                let _: () = unsafe { msg_send![&*panel, setSharingType: sharing] };
 
-                            // MoveToActiveSpace so show_existing can pull
-                            // it to any Space (including fullscreen).
-                            panel.set_collection_behaviour(
+                                // MoveToActiveSpace so show_existing can pull
+                                // it to any Space (including fullscreen).
+                                panel.set_collection_behaviour(
                                 NSWindowCollectionBehavior::NSWindowCollectionBehaviorMoveToActiveSpace |
                                 NSWindowCollectionBehavior::NSWindowCollectionBehaviorIgnoresCycle |
                                 NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
