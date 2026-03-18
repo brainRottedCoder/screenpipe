@@ -13,7 +13,7 @@ use serde_json::json;
 use std::path::{Path, PathBuf};
 use tracing::{debug, error, info, warn};
 
-const PI_PACKAGE: &str = "@mariozechner/pi-coding-agent@0.57.1";
+const PI_PACKAGE: &str = "@mariozechner/pi-coding-agent@0.60.0";
 pub const SCREENPIPE_API_URL: &str = "https://api.screenpi.pe/v1";
 
 /// Returns the screenpipe cloud models array as a serde_json::Value.
@@ -1064,7 +1064,7 @@ fn is_local_pi_version_current() -> bool {
         Some(v) => v,
         None => return false,
     };
-    // PI_PACKAGE is "@mariozechner/pi-coding-agent@0.57.1" — extract version after last '@'
+    // PI_PACKAGE is "@mariozechner/pi-coding-agent@0.60.0" — extract version after last '@'
     let expected = PI_PACKAGE.rsplit('@').next().unwrap_or("");
     if installed != expected {
         info!(
@@ -1277,7 +1277,51 @@ fn build_async_command(path: &str) -> tokio::process::Command {
         if let Some(bun_path) = find_bun_executable() {
             if let Some(bun_dir) = std::path::Path::new(&bun_path).parent() {
                 let current_path = std::env::var("PATH").unwrap_or_default();
-                let new_path = format!("{};{}", bun_dir.display(), current_path);
+                let mut new_path = format!("{};{}", bun_dir.display(), current_path);
+
+                // On Windows, inject bash into PATH for Pi's bash tool.
+                // Check bundled PortableGit, then standard Git for Windows paths.
+                {
+                    let bash_dirs: Vec<std::path::PathBuf> = {
+                        let mut dirs = Vec::new();
+                        // 1. Bundled PortableGit
+                        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+                            let bundled = std::path::PathBuf::from(&local_app_data)
+                                .join("screenpipe")
+                                .join("git-portable")
+                                .join("bin");
+                            if bundled.join("bash.exe").exists() {
+                                dirs.push(bundled);
+                            }
+                        }
+                        // 2. Standard Git for Windows
+                        if dirs.is_empty() {
+                            for p in &[
+                                r"C:\Program Files\Git\bin",
+                                r"C:\Program Files (x86)\Git\bin",
+                            ] {
+                                let dir = std::path::PathBuf::from(p);
+                                if dir.join("bash.exe").exists() {
+                                    dirs.push(dir);
+                                    break;
+                                }
+                            }
+                        }
+                        dirs
+                    };
+                    if let Some(bash_dir) = bash_dirs.first() {
+                        new_path = format!("{};{}", bash_dir.display(), new_path);
+                        // Also add usr/bin for common unix utils (grep, cat, etc.)
+                        if let Some(parent) = bash_dir.parent() {
+                            let usr_bin = parent.join("usr").join("bin");
+                            if usr_bin.exists() {
+                                new_path = format!("{};{}", usr_bin.display(), new_path);
+                            }
+                        }
+                        debug!("injected bash dir into PATH for pi: {}", bash_dir.display());
+                    }
+                }
+
                 cmd.env("PATH", new_path);
                 debug!("injected bun dir into PATH for pi: {}", bun_dir.display());
             }

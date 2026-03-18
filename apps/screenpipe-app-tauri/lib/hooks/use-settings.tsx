@@ -141,6 +141,14 @@ export type Settings = SettingsStore & {
 	powerMode?: "auto" | "performance" | "battery_saver";
 	/** Show restart notifications when audio/vision capture stalls (default: false for now) */
 	showRestartNotifications?: boolean;
+	/** Notification preferences — which notification sources are enabled */
+	notificationPrefs?: {
+		captureStalls: boolean;
+		appUpdates: boolean;
+		pipeSuggestions: boolean;
+		pipeNotifications: boolean;
+		mutedPipes: string[];
+	};
 }
 
 export function getEffectiveFilters(settings: Settings) {
@@ -200,7 +208,7 @@ const DEFAULT_PI_PRESET: AIPreset = {
 	id: "pi-agent",
 	provider: "pi",
 	url: "",
-	model: "gemini-3.1-pro",
+	model: "claude-haiku-4-5",
 	maxContextChars: 1000000,
 	defaultPreset: true,
 	prompt: "",
@@ -705,7 +713,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 			});
 
 			if (!response.ok) {
-				throw new Error("failed to verify token");
+				const body = await response.text().catch(() => "<no body>");
+				throw new Error(`failed to verify token: ${response.status} ${response.statusText} - ${body}`);
 			}
 
 			const data = await response.json();
@@ -740,7 +749,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
 			await updateSettings({ user: userData });
 		} catch (err) {
-			console.error("failed to load user:", err);
+			console.error("failed to load user:", err instanceof Error ? err.message : err);
 			throw err;
 		}
 	};

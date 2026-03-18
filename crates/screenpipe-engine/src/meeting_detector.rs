@@ -378,11 +378,11 @@ impl Default for MeetingUiScanner {
 }
 
 impl MeetingUiScanner {
-    /// Create a new scanner with default settings (depth=25, timeout=500ms).
+    /// Create a new scanner with default settings (depth=25, timeout=5s).
     pub fn new() -> Self {
         Self {
             max_depth: 25,
-            scan_timeout: Duration::from_millis(2000),
+            scan_timeout: Duration::from_millis(5000),
         }
     }
 
@@ -535,7 +535,7 @@ impl MeetingUiScanner {
         let signals_found = matched_signals.len();
         let is_in_call = signals_found >= profile.min_signals_required;
 
-        debug!(
+        info!(
             "meeting scanner: pid={} app={} signals={} in_call={} matched={:?}",
             pid, app_name, signals_found, is_in_call, matched_signals,
         );
@@ -692,6 +692,7 @@ impl PrecomputedSignal {
 /// `title` and `desc` are expected to be raw (not lowercased) for the original
 /// `check_signal_match` entry point. For the optimized hot path, use
 /// `check_signal_match_precomputed` with pre-lowercased values.
+#[cfg(any(target_os = "windows", test))]
 fn check_signal_match(
     signal: &CallSignal,
     role: &str,
@@ -700,7 +701,7 @@ fn check_signal_match(
     identifier: Option<&str>,
 ) -> bool {
     match signal {
-        CallSignal::AutomationId(id) => identifier.map_or(false, |ident| ident == *id),
+        CallSignal::AutomationId(id) => identifier.map_or(false, |ident| ident.eq_ignore_ascii_case(id)),
         CallSignal::AutomationIdContains(substr) => identifier.map_or(false, |ident| {
             ident.to_lowercase().contains(&substr.to_lowercase())
         }),
@@ -757,8 +758,7 @@ fn check_signal_match_precomputed(
 ) -> bool {
     match &ps.signal {
         CallSignal::AutomationId(id) => {
-            // exact match (not lowercased — automation IDs are case-sensitive)
-            identifier_lower.map_or(false, |ident| ident == *id)
+            identifier_lower.map_or(false, |ident| ident.eq_ignore_ascii_case(id))
         }
         CallSignal::AutomationIdContains(_) => {
             identifier_lower.map_or(false, |ident| ident.contains(&ps.lower[..]))
@@ -882,6 +882,7 @@ fn get_app_name_for_pid(pid: i32) -> Option<String> {
 #[derive(Debug, Clone)]
 struct WindowsProcessInfo {
     pid: u32,
+    parent_pid: u32,
     name: String,
 }
 
@@ -917,6 +918,7 @@ fn windows_enumerate_processes() -> Vec<WindowsProcessInfo> {
                 );
                 results.push(WindowsProcessInfo {
                     pid: entry.th32ProcessID,
+                    parent_pid: entry.th32ParentProcessID,
                     name,
                 });
                 if Process32NextW(snapshot, &mut entry).is_err() {
@@ -983,13 +985,54 @@ fn windows_enumerate_window_titles() -> Vec<(i32, String)> {
         .unwrap_or_default()
 }
 
+/// Enumerate visible windows belonging to a specific PID.
+#[cfg(target_os = "windows")]
+fn enumerate_windows_for_pid(target_pid: u32) -> Vec<windows::Win32::Foundation::HWND> {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    };
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
+    use std::sync::Mutex;
+
+    let param_data = (target_pid, Mutex::new(Vec::<HWND>::new()));
+
+    unsafe extern "system" fn enum_for_pid(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let (target_pid, hwnds) =
+            &*(lparam.0 as *const (u32, Mutex<Vec<HWND>>));
+
+        if IsWindowVisible(hwnd).as_bool() {
+            let mut win_pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, Some(&mut win_pid));
+            if win_pid == *target_pid {
+                if let Ok(mut h) = hwnds.lock() {
+                    h.push(hwnd);
+                }
+            }
+        }
+        BOOL(1)
+    }
+
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_for_pid),
+            LPARAM(&param_data as *const (u32, Mutex<Vec<HWND>>) as isize),
+        );
+    }
+
+    param_data.1.into_inner().unwrap_or_default()
+}
+
 /// Scan a process's windows via Windows UI Automation for call control signals.
+///
+/// Uses UIA's FindAll with property conditions to search the entire tree including
+/// WebView2/Electron content that TreeWalker cannot traverse. Falls back to cached
+/// tree walking for native apps where FindAll conditions don't cover all signal types.
 #[cfg(target_os = "windows")]
 fn windows_scan_process_uia(
     pid: i32,
     signals: &[CallSignal],
     min_required: usize,
-    max_depth: usize,
+    _max_depth: usize,
     timeout: Duration,
 ) -> Result<Vec<String>, String> {
     use std::sync::Mutex;
@@ -997,9 +1040,9 @@ fn windows_scan_process_uia(
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_ALL, COINIT_APARTMENTTHREADED,
     };
-    use windows::Win32::UI::Accessibility::{CUIAutomation, IUIAutomation};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+    use windows::Win32::UI::Accessibility::{
+        CUIAutomation, IUIAutomation, IUIAutomationCondition, TreeScope_Descendants,
+        UIA_NamePropertyId, UIA_AutomationIdPropertyId,
     };
 
     unsafe {
@@ -1008,36 +1051,37 @@ fn windows_scan_process_uia(
         let automation: IUIAutomation = CoCreateInstance(&CUIAutomation, None, CLSCTX_ALL)
             .map_err(|e| format!("UIA init failed: {}", e))?;
 
-        let walker = automation
-            .ControlViewWalker()
-            .map_err(|e| format!("walker failed: {}", e))?;
-
-        // Enumerate windows for this PID
-        let target_pid = pid as u32;
-        let param_data = (target_pid, Mutex::new(Vec::<HWND>::new()));
-
-        unsafe extern "system" fn enum_for_pid(hwnd: HWND, lparam: LPARAM) -> BOOL {
-            let (target_pid, hwnds) = &*(lparam.0 as *const (u32, Mutex<Vec<HWND>>));
-
-            if IsWindowVisible(hwnd).as_bool() {
-                let mut win_pid: u32 = 0;
-                GetWindowThreadProcessId(hwnd, Some(&mut win_pid));
-                if win_pid == *target_pid {
-                    if let Ok(mut h) = hwnds.lock() {
-                        h.push(hwnd);
+        // Build UIA property conditions from our signals for FindAll search.
+        // This pierces WebView2/Electron boundaries that TreeWalker cannot traverse.
+        let mut conditions = Vec::new();
+        for signal in signals {
+            match signal {
+                CallSignal::AutomationId(id) => {
+                    if let Ok(cond) = automation.CreatePropertyCondition(
+                        UIA_AutomationIdPropertyId,
+                        &windows::core::VARIANT::from(*id),
+                    ) {
+                        conditions.push(cond);
                     }
                 }
+                CallSignal::NameContains(name) | CallSignal::RoleWithName { name_contains: name, .. } => {
+                    // UIA PropertyCondition doesn't support substring match,
+                    // so we search for exact name. For "leave"/"hang up" this works
+                    // because the button name IS the keyword.
+                    if let Ok(cond) = automation.CreatePropertyCondition(
+                        UIA_NamePropertyId,
+                        &windows::core::VARIANT::from(*name),
+                    ) {
+                        conditions.push(cond);
+                    }
+                }
+                // KeyboardShortcut, AutomationIdContains, MenuBarItem, MenuItemId
+                // can't be expressed as simple PropertyConditions — handled by tree walk below
+                _ => {}
             }
-            BOOL(1)
         }
 
-        let _ = EnumWindows(
-            Some(enum_for_pid),
-            LPARAM(&param_data as *const (u32, Mutex<Vec<HWND>>) as isize),
-        );
-
-        let window_handles = param_data.1.into_inner().unwrap_or_default();
-
+        let window_handles = enumerate_windows_for_pid(pid as u32);
         let start = Instant::now();
         let mut found = Vec::new();
 
@@ -1051,171 +1095,82 @@ fn windows_scan_process_uia(
                 Err(_) => continue,
             };
 
-            windows_walk_uia(
-                &walker,
-                &element,
-                signals,
-                0,
-                max_depth,
-                &start,
-                timeout,
-                &mut found,
-                min_required,
-            );
+            // Strategy 1: Use FindAll with OR'd conditions (pierces WebView2)
+            if !conditions.is_empty() {
+                let search_condition: IUIAutomationCondition = if conditions.len() == 1 {
+                    conditions[0].clone().into()
+                } else {
+                    // Build OR condition from all individual conditions
+                    let first: IUIAutomationCondition = conditions[0].clone().into();
+                    let second: IUIAutomationCondition = conditions[1].clone().into();
+                    let mut combined = automation
+                        .CreateOrCondition(&first, &second)
+                        .ok();
+                    for cond in &conditions[2..] {
+                        if let Some(ref prev) = combined {
+                            let prev_cond: IUIAutomationCondition = prev.clone().into();
+                            let next_cond: IUIAutomationCondition = cond.clone().into();
+                            combined = automation.CreateOrCondition(&prev_cond, &next_cond).ok();
+                        }
+                    }
+                    match combined {
+                        Some(c) => c.into(),
+                        None => continue,
+                    }
+                };
+
+                if let Ok(results) = element.FindAll(TreeScope_Descendants, &search_condition) {
+                    if let Ok(len) = results.Length() {
+                        for i in 0..len {
+                            if found.len() >= min_required {
+                                break;
+                            }
+                            if let Ok(el) = results.GetElement(i) {
+                                let name = el.CurrentName().ok().map(|s| s.to_string());
+                                let auto_id = el.CurrentAutomationId().ok().map(|s| s.to_string());
+                                let role = el.CurrentLocalizedControlType()
+                                    .ok().map(|s| s.to_string()).unwrap_or_default();
+
+                                // Verify this element actually matches one of our signals
+                                for signal in signals {
+                                    if check_signal_match(
+                                        signal, &role,
+                                        name.as_deref(), None,
+                                        auto_id.as_deref(),
+                                    ) {
+                                        let label = format_signal_match(
+                                            signal, &role, name.as_deref(), None,
+                                        );
+                                        if !found.contains(&label) {
+                                            found.push(label);
+                                        }
+                                        break;
+                                    }
+                                    // Also check with AX prefix for cross-platform compat
+                                    let ax_role = format!("AX{}", role);
+                                    if check_signal_match(
+                                        signal, &ax_role,
+                                        name.as_deref(), None,
+                                        auto_id.as_deref(),
+                                    ) {
+                                        let label = format_signal_match(
+                                            signal, &role, name.as_deref(), None,
+                                        );
+                                        if !found.contains(&label) {
+                                            found.push(label);
+                                        }
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         CoUninitialize();
         Ok(found)
-    }
-}
-
-/// Walk UIA element tree looking for call signals (Windows).
-#[cfg(target_os = "windows")]
-unsafe fn windows_walk_uia(
-    walker: &windows::Win32::UI::Accessibility::IUIAutomationTreeWalker,
-    element: &windows::Win32::UI::Accessibility::IUIAutomationElement,
-    signals: &[CallSignal],
-    depth: usize,
-    max_depth: usize,
-    start: &Instant,
-    timeout: Duration,
-    found: &mut Vec<String>,
-    min_required: usize,
-) {
-    if depth >= max_depth || start.elapsed() >= timeout || found.len() >= min_required {
-        return;
-    }
-
-    let role = element
-        .CurrentLocalizedControlType()
-        .ok()
-        .map(|s| s.to_string())
-        .unwrap_or_default();
-
-    let name = element.CurrentName().ok().map(|s| s.to_string());
-    let automation_id = element.CurrentAutomationId().ok().map(|s| s.to_string());
-    let help_text = element.CurrentHelpText().ok().map(|s| s.to_string());
-    let accel_key = element.CurrentAcceleratorKey().ok().map(|s| s.to_string());
-
-    // Windows uses "Button", macOS uses "AXButton" — match both forms
-    let ax_role = format!("AX{}", role);
-    let role_lower = role.to_lowercase();
-
-    for signal in signals {
-        let matched = match signal {
-            CallSignal::AutomationId(id) => automation_id.as_deref().map_or(false, |a| a == *id),
-            CallSignal::AutomationIdContains(substr) => automation_id
-                .as_deref()
-                .map_or(false, |a| a.to_lowercase().contains(&substr.to_lowercase())),
-            CallSignal::KeyboardShortcut(shortcut) => {
-                let s_lower = shortcut.to_lowercase();
-                help_text
-                    .as_deref()
-                    .map_or(false, |h| h.to_lowercase().contains(&s_lower))
-                    || accel_key
-                        .as_deref()
-                        .map_or(false, |a| a.to_lowercase().contains(&s_lower))
-                    || name
-                        .as_deref()
-                        .map_or(false, |n| n.to_lowercase().contains(&s_lower))
-            }
-            CallSignal::RoleWithName {
-                role: r,
-                name_contains,
-            } => {
-                let expected = r.strip_prefix("AX").unwrap_or(r);
-                let role_matches = role == *r
-                    || ax_role == *r
-                    || role == expected
-                    || role_lower == expected.to_lowercase();
-                if !role_matches {
-                    false
-                } else {
-                    let needle = name_contains.to_lowercase();
-                    name.as_deref()
-                        .map_or(false, |n| n.to_lowercase().contains(&needle))
-                        || help_text
-                            .as_deref()
-                            .map_or(false, |h| h.to_lowercase().contains(&needle))
-                }
-            }
-            CallSignal::MenuBarItem { title_contains } => {
-                (role_lower == "menu bar" || role_lower == "menubar")
-                    && name.as_deref().map_or(false, |n| {
-                        n.to_lowercase().contains(&title_contains.to_lowercase())
-                    })
-            }
-            CallSignal::MenuItemId(expected_id) => {
-                (role_lower == "menu item" || role_lower == "menuitem")
-                    && automation_id
-                        .as_deref()
-                        .map_or(false, |a| a == *expected_id)
-            }
-            CallSignal::NameContains(needle) => {
-                let n_lower = needle.to_lowercase();
-                name.as_deref()
-                    .map_or(false, |n| n.to_lowercase().contains(&n_lower))
-                    || help_text
-                        .as_deref()
-                        .map_or(false, |h| h.to_lowercase().contains(&n_lower))
-            }
-        };
-
-        if matched {
-            let label = format_signal_match(signal, &role, name.as_deref(), help_text.as_deref());
-            if !found.contains(&label) {
-                found.push(label);
-            }
-        }
-    }
-
-    if found.len() >= min_required {
-        return;
-    }
-
-    // Skip content areas
-    if role_lower == "edit"
-        || role_lower == "document"
-        || role_lower == "text"
-        || role_lower == "list"
-    {
-        return;
-    }
-
-    // Walk children
-    if let Ok(child) = walker.GetFirstChildElement(element) {
-        windows_walk_uia(
-            walker,
-            &child,
-            signals,
-            depth + 1,
-            max_depth,
-            start,
-            timeout,
-            found,
-            min_required,
-        );
-
-        let mut current = child;
-        while found.len() < min_required && start.elapsed() < timeout {
-            match walker.GetNextSiblingElement(&current) {
-                Ok(next) => {
-                    windows_walk_uia(
-                        walker,
-                        &next,
-                        signals,
-                        depth + 1,
-                        max_depth,
-                        start,
-                        timeout,
-                        found,
-                        min_required,
-                    );
-                    current = next;
-                }
-                Err(_) => break,
-            }
-        }
     }
 }
 
@@ -1657,7 +1612,7 @@ pub fn find_running_meeting_apps(
         }
     }
 
-    // Match native app processes
+    // Match native app processes + their child processes (e.g., Teams spawns msedgewebview2.exe)
     for (idx, profile) in profiles.iter().enumerate() {
         for proc in process_map.iter() {
             let proc_name_lower = proc.name.to_lowercase();
@@ -1668,6 +1623,7 @@ pub fn find_running_meeting_apps(
                 .any(|n| proc_name_lower == n.to_lowercase());
 
             if matches_native && !seen_pids.contains(&(proc.pid as i32)) {
+                // Add the main process
                 results.push(RunningMeetingApp {
                     pid: proc.pid as i32,
                     app_name: proc.name.clone(),
@@ -1675,6 +1631,28 @@ pub fn find_running_meeting_apps(
                     browser_url: None,
                 });
                 seen_pids.insert(proc.pid as i32);
+
+                // Also add child processes that render UI (Teams uses msedgewebview2.exe).
+                // Only include known UI-hosting children to avoid scanning 10-15+ GPU/utility
+                // worker processes that would each block for 2s+ on timeout.
+                const UI_CHILD_PROCESS_NAMES: &[&str] = &[
+                    "msedgewebview2.exe",
+                    "webview2.exe",
+                ];
+                for child in process_map.iter() {
+                    if child.parent_pid == proc.pid
+                        && !seen_pids.contains(&(child.pid as i32))
+                        && UI_CHILD_PROCESS_NAMES.iter().any(|n| child.name.eq_ignore_ascii_case(n))
+                    {
+                        results.push(RunningMeetingApp {
+                            pid: child.pid as i32,
+                            app_name: format!("{} ({})", proc.name, child.name),
+                            profile_index: idx,
+                            browser_url: None,
+                        });
+                        seen_pids.insert(child.pid as i32);
+                    }
+                }
             }
         }
     }
@@ -1751,8 +1729,14 @@ pub fn find_running_meeting_apps(
 // Detection Loop
 // ============================================================================
 
-/// Default scan interval (how often we scan for meeting controls).
-const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+/// Scan interval when actively tracking a meeting (Confirming/Active/Ending).
+const ACTIVE_SCAN_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Scan interval when idle and meeting apps are running but no call detected.
+const IDLE_APPS_SCAN_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Scan interval when idle and no meeting apps are running at all.
+const IDLE_NO_APPS_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 
 /// Run the meeting detection loop.
 ///
@@ -1761,6 +1745,64 @@ const DEFAULT_SCAN_INTERVAL: Duration = Duration::from_secs(5);
 /// periodic UI scanning approach.
 ///
 /// The loop:
+/// Query recent frames from the DB to find browser windows with meeting URLs.
+/// This is more reliable than live AX queries because some browsers (Arc) don't
+/// expose URLs via AXDocument or AX window titles.
+async fn db_find_browser_meetings(
+    db: &DatabaseManager,
+    profiles: &[MeetingDetectionProfile],
+) -> Result<Vec<RunningMeetingApp>, sqlx::Error> {
+    let mut results = Vec::new();
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT DISTINCT app_name, window_name FROM frames \
+         WHERE timestamp > datetime('now', '-30 seconds') \
+         AND app_name IS NOT NULL AND window_name IS NOT NULL"
+    )
+    .fetch_all(&db.pool)
+    .await?;
+
+    for (app_name, window_name) in &rows {
+        let window_lower = window_name.to_lowercase();
+        let app_lower = app_name.to_lowercase();
+        for (idx, profile) in profiles.iter().enumerate() {
+            if profile.app_identifiers.browser_url_patterns.is_empty() {
+                continue;
+            }
+            let matches = profile.app_identifiers.browser_url_patterns.iter()
+                .any(|p| window_lower.contains(&p.to_lowercase()));
+            if matches {
+                #[cfg(target_os = "macos")]
+                let pid = cidre::objc::ar_pool(|| -> i32 {
+                    let ws = cidre::ns::Workspace::shared();
+                    let apps = ws.running_apps();
+                    for i in 0..apps.len() {
+                        let a = &apps[i];
+                        if let Some(n) = a.localized_name() {
+                            if n.to_string().to_lowercase() == app_lower {
+                                return a.pid();
+                            }
+                        }
+                    }
+                    -1
+                });
+                #[cfg(not(target_os = "macos"))]
+                let pid = -1i32;
+                if pid > 0 {
+                    debug!("meeting v2: DB hint — {} window {:?} matches profile {}", app_name, window_name, idx);
+                    results.push(RunningMeetingApp {
+                        pid,
+                        app_name: app_name.clone(),
+                        profile_index: idx,
+                        browser_url: Some(window_name.clone()),
+                    });
+                }
+                break;
+            }
+        }
+    }
+    Ok(results)
+}
+
 /// 1. Discovers running meeting app processes
 /// 2. Scans their AX trees for call control signals (on a blocking thread)
 /// 3. Advances the state machine
@@ -1777,7 +1819,14 @@ pub async fn run_meeting_detection_loop(
     let profiles = load_detection_profiles();
     let scanner = Arc::new(MeetingUiScanner::new());
     let mut state = MeetingState::Idle;
-    let interval = scan_interval.unwrap_or(DEFAULT_SCAN_INTERVAL);
+    let base_interval = scan_interval.unwrap_or(ACTIVE_SCAN_INTERVAL);
+    let mut current_interval = base_interval;
+    let mut idle_scan_count: u64 = 0;
+
+    // Check if any profile uses browser URL patterns (to gate DB query)
+    let has_browser_profiles = profiles
+        .iter()
+        .any(|p| !p.app_identifiers.browser_url_patterns.is_empty());
 
     // Close any orphaned meetings from a prior crash
     match db.close_orphaned_meetings().await {
@@ -1787,14 +1836,14 @@ pub async fn run_meeting_detection_loop(
     }
 
     info!(
-        "meeting v2: detection loop started (interval={:?}, profiles={})",
-        interval,
+        "meeting v2: detection loop started (base_interval={:?}, profiles={})",
+        base_interval,
         profiles.len()
     );
 
     loop {
         tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
+            _ = tokio::time::sleep(current_interval) => {}
             _ = shutdown_rx.recv() => {
                 info!("meeting v2: shutdown received, exiting detection loop");
                 // If we're in an active meeting, end it cleanly
@@ -1828,9 +1877,24 @@ pub async fn run_meeting_detection_loop(
         // keeps scanning a browser process even after the tab title changes.
         let tracking = get_active_tracking(&state, &profiles);
 
-        // 1. Find running meeting app processes (blocking AX calls)
+        // 0. Check recent frames in DB for browser meeting URLs.
+        // Only run this query if any profile has browser URL patterns configured,
+        // to avoid unnecessary DB work when no browser-based meetings are possible.
+        let db_browser_hints = if has_browser_profiles {
+            match db_find_browser_meetings(&db, &profiles).await {
+                Ok(hints) => hints,
+                Err(e) => {
+                    debug!("meeting v2: db browser hint query failed: {}", e);
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+
+        // 1. Find running meeting app processes (blocking AX calls for native apps)
         let profiles_clone = profiles.clone();
-        let running_apps = tokio::task::spawn_blocking(move || {
+        let mut running_apps = tokio::task::spawn_blocking(move || {
             find_running_meeting_apps(&profiles_clone, tracking.as_ref())
         })
         .await
@@ -1838,6 +1902,21 @@ pub async fn run_meeting_detection_loop(
             error!("meeting v2: spawn_blocking panicked: {}", e);
             Vec::new()
         });
+
+        // Merge DB browser hints (avoids missing meetings when AX doesn't expose URLs)
+        for hint in db_browser_hints {
+            if !running_apps.iter().any(|a| a.profile_index == hint.profile_index) {
+                running_apps.push(hint);
+            }
+        }
+
+        if !running_apps.is_empty() {
+            debug!(
+                "meeting v2: found {} running meeting app(s): {:?}",
+                running_apps.len(),
+                running_apps.iter().map(|a| format!("{}(pid={})", a.app_name, a.pid)).collect::<Vec<_>>()
+            );
+        }
 
         if running_apps.is_empty() {
             // No meeting apps running — handle fast path for process exit
@@ -1854,6 +1933,22 @@ pub async fn run_meeting_detection_loop(
                 &in_meeting_flag,
                 &detector,
             );
+
+            // Adaptive interval: slow down when idle with no apps
+            if matches!(state, MeetingState::Idle) {
+                current_interval = IDLE_NO_APPS_SCAN_INTERVAL;
+                idle_scan_count += 1;
+                // Periodic summary every ~60s (2 cycles at 30s)
+                if idle_scan_count % 2 == 0 {
+                    debug!(
+                        "meeting v2: idle, no meeting apps (scans={})",
+                        idle_scan_count
+                    );
+                }
+            } else {
+                // Ending/Confirming state — keep scanning at active rate
+                current_interval = base_interval;
+            }
             continue;
         }
 
@@ -1887,6 +1982,13 @@ pub async fn run_meeting_detection_loop(
         // 3. Advance state machine
         let (new_state, action) = advance_state(state, &scan_results);
         state = new_state;
+
+        // Adaptive interval based on state
+        idle_scan_count = 0; // reset idle counter when apps are present
+        current_interval = match &state {
+            MeetingState::Idle => IDLE_APPS_SCAN_INTERVAL, // apps open but no call
+            _ => base_interval, // Confirming/Active/Ending — scan fast
+        };
 
         // 4. Handle actions
         if let Some(action) = action {
@@ -2777,5 +2879,137 @@ mod tests {
             None,
             None
         ));
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod live_tests {
+    use super::*;
+
+    /// Run with: cargo test -p screenpipe-engine --lib -- live_tests::test_live_meeting_detection --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn test_live_meeting_detection() {
+        let profiles = load_detection_profiles();
+        println!("\n=== Loaded {} profiles ===", profiles.len());
+
+        // Step 1: find running meeting apps
+        println!("\n=== Step 1: find_running_meeting_apps ===");
+        let apps = find_running_meeting_apps(&profiles, None);
+        println!("Found {} running meeting app(s)", apps.len());
+        for app in &apps {
+            println!("  {} (pid={}, profile={})", app.app_name, app.pid, app.profile_index);
+        }
+
+        if apps.is_empty() {
+            // Debug: list all browsers and their window titles
+            println!("\n=== DEBUG: listing all browser apps ===");
+            cidre::objc::ar_pool(|| {
+                let workspace = cidre::ns::Workspace::shared();
+                let running = workspace.running_apps();
+                for i in 0..running.len() {
+                    let app = &running[i];
+                    let name = app.localized_name().map(|s| s.to_string()).unwrap_or_default();
+                    let name_lower = name.to_lowercase();
+                    if BROWSER_NAMES.iter().any(|b| name_lower.contains(b)) {
+                        println!("\nBROWSER: {} (pid={})", name, app.pid());
+                        let ax_app = cidre::ax::UiElement::with_app_pid(app.pid());
+                        let _ = ax_app.set_messaging_timeout_secs(2.0);
+                        match ax_app.children() {
+                            Ok(children) => {
+                                println!("  children count: {}", children.len());
+                                for j in 0..children.len() {
+                                    let child = &children[j];
+                                    let _ = child.set_messaging_timeout_secs(0.5);
+                                    if let Some(title) = get_ax_string_attr(child, cidre::ax::attr::title()) {
+                                        let has_meet = title.to_lowercase().contains("google meet") || title.to_lowercase().contains("meet.google.com");
+                                        if has_meet {
+                                            println!("  *** MEET WINDOW [{}]: {:?}", j, title);
+                                        } else {
+                                            println!("  window[{}]: {:?}", j, &title[..title.len().min(80)]);
+                                        }
+                                    }
+                                    if let Some(doc) = get_ax_string_attr(child, cidre::ax::attr::document()) {
+                                        if doc.to_lowercase().contains("meet.google") {
+                                            println!("  *** MEET DOC [{}]: {:?}", j, doc);
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => println!("  children ERROR: {:?}", e),
+                        }
+                    }
+                }
+            });
+        }
+
+        // Step 2: scan for call controls
+        if !apps.is_empty() {
+            println!("\n=== Step 2: scanning for call controls ===");
+            let scanner = MeetingUiScanner::new();
+            for app in &apps {
+                let result = scanner.scan_process(app.pid, &profiles[app.profile_index]);
+                println!("  {} => in_call={}, signals={}, matched={:?}",
+                    app.app_name, result.is_in_call, result.signals_found, result.matched_signals);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod live_tests2 {
+    use super::*;
+
+    /// Run with: cargo test -p screenpipe-engine --lib -- live_tests2::test_arc_deep_window_check --nocapture --ignored
+    #[test]
+    #[ignore]
+    fn test_arc_deep_window_check() {
+        cidre::objc::ar_pool(|| {
+            let workspace = cidre::ns::Workspace::shared();
+            let running = workspace.running_apps();
+            for i in 0..running.len() {
+                let app = &running[i];
+                let name = app.localized_name().map(|s| s.to_string()).unwrap_or_default();
+                if name != "Arc" { continue; }
+                
+                println!("Arc pid={}", app.pid());
+                let ax_app = cidre::ax::UiElement::with_app_pid(app.pid());
+                let _ = ax_app.set_messaging_timeout_secs(2.0);
+                
+                let windows = ax_app.children().unwrap();
+                for j in 0..windows.len() {
+                    let window = &windows[j];
+                    let _ = window.set_messaging_timeout_secs(1.0);
+                    
+                    let title = get_ax_string_attr(window, cidre::ax::attr::title()).unwrap_or_default();
+                    let doc = get_ax_string_attr(window, cidre::ax::attr::document()).unwrap_or_default();
+                    println!("\nwindow[{}] title={:?} doc={:?}", j, title, doc);
+                    
+                    // Check role
+                    let role = get_ax_string_attr(window, cidre::ax::attr::role()).unwrap_or_default();
+                    println!("  role={:?}", role);
+                    
+                    // Walk 2 levels deep looking for URL or "Google Meet"
+                    if let Ok(children) = window.children() {
+                        println!("  children: {}", children.len());
+                        for k in 0..children.len().min(20) {
+                            let child = &children[k];
+                            let _ = child.set_messaging_timeout_secs(0.3);
+                            let crole = get_ax_string_attr(child, cidre::ax::attr::role()).unwrap_or_default();
+                            let ctitle = get_ax_string_attr(child, cidre::ax::attr::title()).unwrap_or_default();
+                            let cdoc = get_ax_string_attr(child, cidre::ax::attr::document()).unwrap_or_default();
+                            let cval = get_ax_string_attr(child, cidre::ax::attr::value()).unwrap_or_default();
+                            
+                            if !ctitle.is_empty() || !cdoc.is_empty() || cval.contains("meet") || cval.contains("google") {
+                                println!("  child[{}] role={:?} title={:?} doc={:?} val={:?}", 
+                                    k, crole, &ctitle[..ctitle.len().min(60)], &cdoc[..cdoc.len().min(60)], &cval[..cval.len().min(80)]);
+                            }
+                        }
+                    }
+                }
+            }
+        });
     }
 }

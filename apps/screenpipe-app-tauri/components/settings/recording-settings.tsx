@@ -54,6 +54,7 @@ import {
   Upload,
   Trash2,
   Search,
+  Bell,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
@@ -636,6 +637,10 @@ export function RecordingSettings() {
     const checkPlatform = async () => {
       const currentPlatform = platform();
       setIsMacOS(currentPlatform === "macos");
+      // Auto-migrate macOS users off qwen3-asr (CPU-only, no Metal support)
+      if (currentPlatform === "macos" && settings.audioTranscriptionEngine === "qwen3-asr") {
+        handleSettingsChange({ audioTranscriptionEngine: "whisper-large-v3-turbo-quantized" }, true);
+      }
     };
     checkPlatform();
   }, []);
@@ -1303,7 +1308,7 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                     <SelectItem value="whisper-large-v3-turbo-quantized">Whisper Turbo (fast)</SelectItem>
                     <SelectItem value="whisper-tiny">Whisper Tiny</SelectItem>
                     <SelectItem value="whisper-tiny-quantized">Whisper Tiny (fast)</SelectItem>
-                    <SelectItem value="qwen3-asr">Qwen3-ASR</SelectItem>
+                    {!isMacOS && <SelectItem value="qwen3-asr">Qwen3-ASR</SelectItem>}
                   </SelectGroup>
                   <SelectGroup>
                     <SelectLabel className="text-[10px] text-muted-foreground/70 uppercase tracking-wider">other</SelectLabel>
@@ -1957,6 +1962,94 @@ Your screen is a pipe. Everything you see, hear, and type flows through it. Scre
                 }}
                 className="w-20 h-7 text-xs text-right"
               />
+            </div>
+          </CardContent>
+        </Card>
+
+        <Card className="border-border bg-card">
+          <CardContent className="px-3 py-2.5 space-y-3">
+            <div className="flex items-center space-x-2.5">
+              <Bell className="h-4 w-4 text-muted-foreground shrink-0" />
+              <h3 className="text-sm font-medium text-foreground">Notifications</h3>
+            </div>
+            <div className="ml-[26px] space-y-2">
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-foreground">Capture stalls</p>
+                  <p className="text-[10px] text-muted-foreground">alert when audio/vision stops</p>
+                </div>
+                <Switch
+                  checked={settings.notificationPrefs?.captureStalls ?? true}
+                  onCheckedChange={(v) => {
+                    const prefs = settings.notificationPrefs || { captureStalls: true, appUpdates: true, pipeSuggestions: true, pipeNotifications: true, mutedPipes: [] };
+                    handleSettingsChange({ notificationPrefs: { ...prefs, captureStalls: v }, showRestartNotifications: v }, true);
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-foreground">App updates</p>
+                  <p className="text-[10px] text-muted-foreground">new version available</p>
+                </div>
+                <Switch
+                  checked={settings.notificationPrefs?.appUpdates ?? true}
+                  onCheckedChange={(v) => {
+                    const prefs = settings.notificationPrefs || { captureStalls: true, appUpdates: true, pipeSuggestions: true, pipeNotifications: true, mutedPipes: [] };
+                    handleSettingsChange({ notificationPrefs: { ...prefs, appUpdates: v } }, true);
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-foreground">Pipe suggestions</p>
+                  <p className="text-[10px] text-muted-foreground">AI automation ideas</p>
+                </div>
+                <Switch
+                  checked={settings.notificationPrefs?.pipeSuggestions ?? true}
+                  onCheckedChange={(v) => {
+                    const prefs = settings.notificationPrefs || { captureStalls: true, appUpdates: true, pipeSuggestions: true, pipeNotifications: true, mutedPipes: [] };
+                    handleSettingsChange({ notificationPrefs: { ...prefs, pipeSuggestions: v } }, true);
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <p className="text-xs text-foreground">Pipe notifications</p>
+                  <p className="text-[10px] text-muted-foreground">alerts from installed pipes</p>
+                </div>
+                <Switch
+                  checked={settings.notificationPrefs?.pipeNotifications ?? true}
+                  onCheckedChange={(v) => {
+                    const prefs = settings.notificationPrefs || { captureStalls: true, appUpdates: true, pipeSuggestions: true, pipeNotifications: true, mutedPipes: [] };
+                    handleSettingsChange({ notificationPrefs: { ...prefs, pipeNotifications: v } }, true);
+                  }}
+                />
+              </div>
+              {(settings.notificationPrefs?.mutedPipes?.length ?? 0) > 0 && (
+                <div className="pt-1 border-t border-border/50">
+                  <p className="text-[10px] text-muted-foreground mb-1">muted pipes</p>
+                  <div className="flex flex-wrap gap-1">
+                    {settings.notificationPrefs!.mutedPipes.map((pipe) => (
+                      <span
+                        key={pipe}
+                        className="inline-flex items-center gap-1 px-1.5 py-0.5 bg-muted rounded text-[10px] text-muted-foreground"
+                      >
+                        {pipe}
+                        <button
+                          className="hover:text-foreground"
+                          onClick={() => {
+                            const prefs = { ...settings.notificationPrefs! };
+                            prefs.mutedPipes = prefs.mutedPipes.filter((p) => p !== pipe);
+                            handleSettingsChange({ notificationPrefs: prefs }, true);
+                          }}
+                        >
+                          ✕
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           </CardContent>
         </Card>

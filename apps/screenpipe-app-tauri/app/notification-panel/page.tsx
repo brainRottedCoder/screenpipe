@@ -10,11 +10,21 @@ import { invoke } from "@tauri-apps/api/core";
 import posthog from "posthog-js";
 import ReactMarkdown from "react-markdown";
 import { showChatWithPrefill } from "@/lib/chat-utils";
+import localforage from "localforage";
 
 interface NotificationAction {
   label: string;
   action: string;
   primary?: boolean;
+  // Pipe notification action fields
+  id?: string;
+  type?: "pipe" | "api" | "deeplink" | "dismiss";
+  pipe?: string;
+  context?: Record<string, unknown>;
+  url?: string;
+  method?: string;
+  body?: Record<string, unknown>;
+  toast?: string;
 }
 
 interface NotificationPayload {
@@ -24,6 +34,7 @@ interface NotificationPayload {
   body: string;
   actions: NotificationAction[];
   autoDismissMs?: number;
+  pipe_name?: string;
 }
 
 export default function NotificationPanelPage() {
@@ -59,26 +70,69 @@ export default function NotificationPanelPage() {
   );
 
   const handleAction = useCallback(
-    async (action: string) => {
+    async (actionOrObj: string | NotificationAction) => {
+      // Support both old string-based actions and new typed action objects
+      const actionStr = typeof actionOrObj === "string" ? actionOrObj : actionOrObj.action;
+      const actionObj = typeof actionOrObj === "object" ? actionOrObj : null;
+
       posthog.capture("notification_action", {
         type: payload?.type,
         id: payload?.id,
-        action,
+        action: actionStr,
+        actionType: actionObj?.type,
       });
 
       try {
-        if (action === "open_timeline") {
+        // New typed action dispatch (pipe notifications)
+        if (actionObj?.type) {
+          switch (actionObj.type) {
+            case "pipe": {
+              const pipeName = actionObj.pipe || payload?.pipe_name;
+              if (pipeName) {
+                await fetch(`http://localhost:3030/pipes/${pipeName}/run`, {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: JSON.stringify({ notification_context: actionObj.context }),
+                });
+              }
+              break;
+            }
+            case "api": {
+              if (actionObj.url) {
+                await fetch(`http://localhost:3030${actionObj.url}`, {
+                  method: actionObj.method || "POST",
+                  headers: { "Content-Type": "application/json" },
+                  body: actionObj.body ? JSON.stringify(actionObj.body) : undefined,
+                });
+              }
+              break;
+            }
+            case "deeplink": {
+              if (actionObj.url) {
+                window.location.href = actionObj.url;
+              }
+              break;
+            }
+            case "dismiss":
+              break;
+          }
+          await hide(false);
+          return;
+        }
+
+        // Legacy string-based action handlers
+        if (actionStr === "open_timeline") {
           await invoke("show_window", { window: "Main" });
-        } else if (action === "open_chat") {
+        } else if (actionStr === "open_chat") {
           await invoke("show_window", { window: "Chat" });
-        } else if (action === "open_pipe_suggestions") {
+        } else if (actionStr === "open_pipe_suggestions") {
           await showChatWithPrefill({
             context: PIPE_SUGGESTION_PROMPT,
             prompt: "what pipes should i create based on my recent activity?",
             autoSend: true,
             source: "pipe-suggestion-notification",
           });
-        } else if (action === "restart_recording") {
+        } else if (actionStr === "restart_recording") {
           setRestartState("restarting");
           setRestartError(null);
           // Pause auto-dismiss while restarting
@@ -133,7 +187,7 @@ export default function NotificationPanelPage() {
 
       await hide(false);
     },
-    [payload?.type, payload?.id, hide]
+    [payload?.type, payload?.id, payload?.pipe_name, hide]
   );
 
   // Listen for notification payloads from Rust
@@ -150,6 +204,21 @@ export default function NotificationPanelPage() {
         posthog.capture("notification_shown", {
           type: data.type,
           id: data.id,
+        });
+
+        // Save to notification history (max 100 entries)
+        localforage.getItem<any[]>("notification-history").then((history) => {
+          const entry = {
+            id: data.id,
+            type: data.type,
+            title: data.title,
+            body: data.body,
+            pipe_name: data.pipe_name,
+            timestamp: new Date().toISOString(),
+            read: false,
+          };
+          const updated = [entry, ...(history || [])].slice(0, 100);
+          localforage.setItem("notification-history", updated);
         });
 
         const dismissMs = data.autoDismissMs ?? 20000;
@@ -354,8 +423,8 @@ export default function NotificationPanelPage() {
             ) : (
               payload.actions.map((action) => (
                 <button
-                  key={action.action}
-                  onClick={() => handleAction(action.action)}
+                  key={action.id || action.action}
+                  onClick={() => handleAction(action.type ? action : action.action)}
                   style={{
                     background: action.primary
                       ? "rgba(0, 0, 0, 0.06)"
@@ -402,6 +471,67 @@ export default function NotificationPanelPage() {
             </span>
           </div>
         )}
+
+        {/* Manage / Mute footer */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            padding: "4px 14px 8px 14px",
+            gap: "8px",
+            borderTop: "1px solid rgba(0, 0, 0, 0.06)",
+          }}
+        >
+          <span
+            onClick={async () => {
+              await emit("open-notification-settings");
+              try { await invoke("show_window", { window: "Settings" }); } catch {}
+            }}
+            style={{
+              fontSize: "9px",
+              color: "rgba(0, 0, 0, 0.3)",
+              cursor: "pointer",
+              fontFamily: '"IBM Plex Mono", monospace',
+            }}
+            onMouseEnter={(e) => (e.currentTarget.style.color = "rgba(0, 0, 0, 0.6)")}
+            onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(0, 0, 0, 0.3)")}
+          >
+            ⚙ manage
+          </span>
+          {payload.pipe_name && (
+            <>
+              <span style={{ fontSize: "9px", color: "rgba(0, 0, 0, 0.15)" }}>·</span>
+              <span
+                onClick={async () => {
+                  try {
+                    const raw = await localforage.getItem<string>("screenpipe-settings");
+                    const settings = raw ? JSON.parse(raw) : {};
+                    const prefs = settings.notificationPrefs || {
+                      captureStalls: true, appUpdates: true,
+                      pipeSuggestions: true, pipeNotifications: true, mutedPipes: [],
+                    };
+                    if (!prefs.mutedPipes.includes(payload.pipe_name!)) {
+                      prefs.mutedPipes.push(payload.pipe_name!);
+                    }
+                    settings.notificationPrefs = prefs;
+                    await localforage.setItem("screenpipe-settings", JSON.stringify(settings));
+                  } catch {}
+                  await hide(false);
+                }}
+                style={{
+                  fontSize: "9px",
+                  color: "rgba(0, 0, 0, 0.3)",
+                  cursor: "pointer",
+                  fontFamily: '"IBM Plex Mono", monospace',
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.color = "rgba(0, 0, 0, 0.6)")}
+                onMouseLeave={(e) => (e.currentTarget.style.color = "rgba(0, 0, 0, 0.3)")}
+              >
+                mute {payload.pipe_name}
+              </span>
+            </>
+          )}
+        </div>
 
         {/* Progress bar */}
         <div

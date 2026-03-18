@@ -717,14 +717,13 @@ impl DatabaseManager {
     /// Execute a pipe UPDATE/INSERT/DELETE via the write queue.
     pub async fn pipe_execute_write_queued(
         &self,
-        id: i64,
+        _id: i64,
         sql: &str,
         binds: Vec<crate::write_queue::PipeBindValue>,
     ) -> Result<(), sqlx::Error> {
         use crate::write_queue::WriteOp;
         self.write_queue
             .submit(WriteOp::PipeUpdateExecution {
-                id,
                 sql: sql.to_string(),
                 binds,
             })
@@ -1937,6 +1936,18 @@ impl DatabaseManager {
                 .or_else(|| ocr_text_str.filter(|t| !t.is_empty()).map(String::from)),
         };
 
+        // Capture element data before moving into the frame write op
+        let ocr_json_for_elements = if elements_ref_frame_id.is_none() {
+            ocr_data.map(|(_, j, _)| j.to_string())
+        } else {
+            None
+        };
+        let a11y_json_for_elements = if elements_ref_frame_id.is_none() {
+            accessibility_tree_json.map(String::from)
+        } else {
+            None
+        };
+
         let result = self
             .write_queue
             .submit(WriteOp::InsertSnapshotFrameWithOcr {
@@ -1961,10 +1972,32 @@ impl DatabaseManager {
             })
             .await?;
 
-        match result {
-            WriteResult::Id(id) => Ok(id),
+        let frame_id = match result {
+            WriteResult::Id(id) => id,
             _ => unreachable!(),
+        };
+
+        // Submit element inserts as a separate write op so they don't hold
+        // the write lock during the frame transaction. Elements are supplementary
+        // data — the frame is usable for search immediately after the first commit.
+        let has_elements = ocr_json_for_elements.as_ref().is_some_and(|j| !j.is_empty())
+            || a11y_json_for_elements.as_ref().is_some_and(|j| !j.is_empty());
+        if has_elements {
+            // Fire-and-forget: spawn so we don't block the capture loop waiting
+            // for element insertion. Errors are logged inside insert_*_elements.
+            let queue = self.write_queue.clone();
+            tokio::spawn(async move {
+                let _ = queue
+                    .submit(WriteOp::InsertDeferredElements {
+                        frame_id,
+                        ocr_text_json: ocr_json_for_elements,
+                        accessibility_tree_json: a11y_json_for_elements,
+                    })
+                    .await;
+            });
         }
+
+        Ok(frame_id)
     }
 
     /// Get the next frame offset for a device.
@@ -4247,6 +4280,15 @@ impl DatabaseManager {
             }
         }
 
+        // 4c. Delete elements belonging to frames in the delete range (no CASCADE on FK)
+        sqlx::query(
+            "DELETE FROM elements WHERE frame_id IN (SELECT id FROM frames WHERE timestamp BETWEEN ?1 AND ?2)",
+        )
+        .bind(&start_str)
+        .bind(&end_str)
+        .execute(&mut **tx.conn())
+        .await?;
+
         // 5. Delete frames — triggers frames_fts delete; vision_tags CASCADE'd automatically
         let frames_result = sqlx::query("DELETE FROM frames WHERE timestamp BETWEEN ?1 AND ?2")
             .bind(&start_str)
@@ -4335,7 +4377,15 @@ impl DatabaseManager {
         .await?;
         let ocr_deleted = ocr_result.rows_affected();
 
-        // 2. Delete frames from this machine (vision_tags CASCADE automatically)
+        // 2. Delete elements for frames from this machine (no CASCADE on FK)
+        sqlx::query(
+            "DELETE FROM elements WHERE frame_id IN (SELECT id FROM frames WHERE machine_id = ?1)",
+        )
+        .bind(machine_id)
+        .execute(&mut **tx.conn())
+        .await?;
+
+        // 3. Delete frames from this machine (vision_tags CASCADE automatically)
         let frames_result = sqlx::query("DELETE FROM frames WHERE machine_id = ?1")
             .bind(machine_id)
             .execute(&mut **tx.conn())
@@ -5936,6 +5986,15 @@ LIMIT ? OFFSET ?
             .rows_affected();
         tx.commit().await?;
         Ok(rows)
+    }
+
+    pub async fn has_active_meeting(&self) -> Result<bool, SqlxError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM meetings WHERE meeting_end IS NULL",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row.0 > 0)
     }
 
     pub async fn list_meetings(

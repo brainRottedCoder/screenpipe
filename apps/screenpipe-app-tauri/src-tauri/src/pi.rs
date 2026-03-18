@@ -199,7 +199,7 @@ fn check_package_bin(pkg_dir: std::path::PathBuf, bin_name: &str) -> Option<Stri
     }
 }
 
-const PI_PACKAGE: &str = "@mariozechner/pi-coding-agent@0.57.1";
+const PI_PACKAGE: &str = "@mariozechner/pi-coding-agent@0.60.0";
 const SCREENPIPE_API_URL: &str = "https://api.screenpi.pe/v1";
 
 /// Pool of Pi sessions — each session_id gets its own PiManager/process.
@@ -268,9 +268,7 @@ pub struct PiManager {
     child: Option<Child>,
     stdin: Option<ChildStdin>,
     project_dir: Option<String>,
-    request_id: u64,
     app_handle: AppHandle,
-    /// Tracks last activity (creation or send_command)
     last_activity: std::time::Instant,
     /// Guard: ensures only one `pi_terminated` event is emitted per session.
     terminated_emitted: Arc<AtomicBool>,
@@ -291,7 +289,6 @@ impl PiManager {
             child: None,
             stdin: None,
             project_dir: None,
-            request_id: 0,
             app_handle,
             last_activity: std::time::Instant::now(),
             terminated_emitted: Arc::new(AtomicBool::new(false)),
@@ -1172,6 +1169,44 @@ pub async fn pi_start_inner(
                             }
                         }
                         info!("Injected bash dir into PATH for pi: {}", bash_dir);
+
+                        // Write shellPath into Pi's settings.json so Pi uses this
+                        // exact bash instead of its own resolution logic (which may
+                        // find a WSL stub or Windows App Alias on machines without
+                        // Git for Windows).
+                        let bash_exe = Path::new(&bash_dir).join("bash.exe");
+                        if bash_exe.exists() {
+                            if let Ok(config_dir) = get_pi_config_dir() {
+                                let settings_path = config_dir.join("settings.json");
+                                let mut settings: serde_json::Value = if settings_path.exists() {
+                                    std::fs::read_to_string(&settings_path)
+                                        .ok()
+                                        .and_then(|c| serde_json::from_str(&c).ok())
+                                        .unwrap_or_else(|| json!({}))
+                                } else {
+                                    json!({})
+                                };
+                                if let Some(obj) = settings.as_object_mut() {
+                                    obj.insert(
+                                        "shellPath".to_string(),
+                                        json!(bash_exe.to_string_lossy()),
+                                    );
+                                }
+                                let _ = std::fs::create_dir_all(&config_dir);
+                                if let Err(e) = std::fs::write(
+                                    &settings_path,
+                                    serde_json::to_string_pretty(&settings).unwrap_or_default(),
+                                ) {
+                                    warn!("failed to write Pi shellPath setting: {}", e);
+                                } else {
+                                    info!(
+                                        "Set Pi shellPath to {} in {:?}",
+                                        bash_exe.display(),
+                                        settings_path
+                                    );
+                                }
+                            }
+                        }
                     }
                     None => {
                         warn!("bash not available — Pi's bash tool may fail on Windows");

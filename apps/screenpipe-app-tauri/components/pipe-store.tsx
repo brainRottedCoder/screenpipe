@@ -117,7 +117,9 @@ interface LocalPipe {
 
 // --- Helpers ---
 
-const CATEGORIES = ["All", "Productivity", "Dev", "Health", "Social", "Other"];
+// Categories are derived dynamically from pipe metadata — no hardcoded taxonomy.
+// Only PUBLISH_CATEGORIES is kept as a suggestion list for the publish form.
+const PUBLISH_CATEGORIES = ["Productivity", "Dev", "Health", "Social", "Other"];
 const SORT_OPTIONS = [
   { value: "popular", label: "Popular" },
   { value: "newest", label: "Newest" },
@@ -303,6 +305,18 @@ function DiscoverView() {
   const [category, setCategory] = useState("All");
   const [sort, setSort] = useState("popular");
 
+  // Derive unique categories from pipe data
+  const dynamicCategories = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const p of pipes) {
+      const cat = p.category || "other";
+      const label = cat.charAt(0).toUpperCase() + cat.slice(1);
+      counts.set(label, (counts.get(label) || 0) + 1);
+    }
+    // Sort by count descending
+    return ["All", ...Array.from(counts.entries()).sort((a, b) => b[1] - a[1]).map(([name]) => name)];
+  }, [pipes]);
+
   // Detail view
   const [selectedPipe, setSelectedPipe] = useState<PipeDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
@@ -330,6 +344,9 @@ function DiscoverView() {
   // Installed pipe names (for "Installed" badge)
   const [installedNames, setInstalledNames] = useState<Set<string>>(new Set());
 
+  // Available updates from store
+  const [availableUpdates, setAvailableUpdates] = useState<Record<string, { latest_version: number; installed_version: number; locally_modified: boolean }>>({});
+
   // Fetch installed pipes (cached 30s, invalidated on install)
   useEffect(() => {
     const cacheKey = "pipes/installed";
@@ -349,6 +366,21 @@ function DiscoverView() {
       .catch(() => {});
   }, [showDetail]);
 
+  // Check for pipe updates
+  useEffect(() => {
+    fetch("http://localhost:3030/pipes/store/check-updates")
+      .then((r) => r.ok ? r.json() : null)
+      .then((json) => {
+        if (!json) return;
+        const updates: Record<string, { latest_version: number; installed_version: number; locally_modified: boolean }> = {};
+        for (const u of json.data || []) {
+          updates[u.pipe_name] = { latest_version: u.latest_version, installed_version: u.installed_version, locally_modified: u.locally_modified };
+        }
+        setAvailableUpdates(updates);
+      })
+      .catch(() => {});
+  }, [showDetail]);
+
   // Debounce search
   const debounceRef = useRef<ReturnType<typeof setTimeout>>();
   useEffect(() => {
@@ -357,10 +389,10 @@ function DiscoverView() {
   }, [searchQuery]);
 
   // Fetch pipes with stale-while-revalidate caching
+  // Category filtering is done client-side so we always have all categories for the pills
   const fetchPipes = useCallback(async () => {
     const params = new URLSearchParams();
     if (debouncedQuery) params.set("q", debouncedQuery);
-    if (category !== "All") params.set("category", category.toLowerCase());
     if (sort) params.set("sort", sort);
     const cacheKey = `pipes/store?${params}`;
 
@@ -374,9 +406,12 @@ function DiscoverView() {
       setLoading(true);
     }
 
-    // Fetch fresh data in background
+    // Fetch fresh data in background (10s timeout to avoid infinite skeletons)
     try {
-      const res = await fetch(`http://localhost:3030/pipes/store?${params}`);
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10_000);
+      const res = await fetch(`http://localhost:3030/pipes/store?${params}`, { signal: controller.signal });
+      clearTimeout(timeoutId);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
       const list = data.data || data.pipes || (Array.isArray(data) ? data : []);
@@ -389,7 +424,7 @@ function DiscoverView() {
     } finally {
       setLoading(false);
     }
-  }, [debouncedQuery, category, sort]);
+  }, [debouncedQuery, sort]);
 
   useEffect(() => {
     fetchPipes();
@@ -560,6 +595,7 @@ function DiscoverView() {
             onSourceReviewedChange={setSourceReviewed}
             onInstall={handleInstall}
             isInstalled={installedNames.has(selectedPipe.slug)}
+            hasUpdate={!!availableUpdates[selectedPipe.slug]}
             reviewExpanded={reviewExpanded}
             onToggleReview={() => setReviewExpanded(!reviewExpanded)}
             reviewRating={reviewRating}
@@ -580,7 +616,16 @@ function DiscoverView() {
     );
   }
 
-  const featuredPipes = pipes.filter((p) => p.featured);
+  // Client-side category filter
+  const filteredPipes = useMemo(() => {
+    if (category === "All") return pipes;
+    return pipes.filter((p) => {
+      const cat = (p.category || "other").charAt(0).toUpperCase() + (p.category || "other").slice(1);
+      return cat === category;
+    });
+  }, [pipes, category]);
+
+  const featuredPipes = filteredPipes.filter((p) => p.featured);
 
   return (
     <div className="space-y-6">
@@ -626,7 +671,7 @@ function DiscoverView() {
 
         {/* Category pills */}
         <div className="flex items-center gap-1.5 overflow-x-auto pb-1">
-          {CATEGORIES.map((c) => (
+          {dynamicCategories.map((c) => (
             <button
               key={c}
               onClick={() => setCategory(c)}
@@ -655,6 +700,7 @@ function DiscoverView() {
                 key={pipe.slug}
                 pipe={pipe}
                 isInstalled={installedNames.has(pipe.slug)}
+                hasUpdate={!!availableUpdates[pipe.slug]}
                 onInstall={() => handleInstall(pipe.slug)}
                 installing={installing === pipe.slug}
                 onClick={() => openDetail(pipe.slug)}
@@ -694,11 +740,12 @@ function DiscoverView() {
         </Card>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-          {pipes.map((pipe) => (
+          {filteredPipes.map((pipe) => (
             <PipeCard
               key={pipe.slug}
               pipe={pipe}
               isInstalled={installedNames.has(pipe.slug)}
+              hasUpdate={!!availableUpdates[pipe.slug]}
               onInstall={() => handleInstall(pipe.slug)}
               installing={installing === pipe.slug}
               onClick={() => openDetail(pipe.slug)}
@@ -726,12 +773,14 @@ function DiscoverView() {
 function FeaturedCard({
   pipe,
   isInstalled,
+  hasUpdate,
   onInstall,
   installing,
   onClick,
 }: {
   pipe: StorePipe;
   isInstalled: boolean;
+  hasUpdate?: boolean;
   onInstall: () => void;
   installing: boolean;
   onClick: () => void;
@@ -761,12 +810,13 @@ function FeaturedCard({
           </div>
           <Button
             size="sm"
-            variant={isInstalled ? "outline" : "default"}
+            variant={isInstalled && !hasUpdate ? "outline" : "default"}
             className={cn(
               "h-7 px-3 text-xs font-semibold rounded-none uppercase tracking-wide flex-shrink-0",
-              isInstalled && "pointer-events-none"
+              isInstalled && !hasUpdate && "pointer-events-none",
+              hasUpdate && "bg-amber-500 hover:bg-amber-600 text-white"
             )}
-            disabled={installing || isInstalled}
+            disabled={installing || (isInstalled && !hasUpdate)}
             onClick={(e) => {
               e.stopPropagation();
               onInstall();
@@ -774,6 +824,8 @@ function FeaturedCard({
           >
             {installing ? (
               <Loader2 className="h-3 w-3 animate-spin" />
+            ) : hasUpdate ? (
+              "UPDATE"
             ) : isInstalled ? (
               "INSTALLED"
             ) : (
@@ -809,12 +861,14 @@ function FeaturedCard({
 function PipeCard({
   pipe,
   isInstalled,
+  hasUpdate,
   onInstall,
   installing,
   onClick,
 }: {
   pipe: StorePipe;
   isInstalled: boolean;
+  hasUpdate?: boolean;
   onInstall: () => void;
   installing: boolean;
   onClick: () => void;
@@ -846,12 +900,13 @@ function PipeCard({
             </div>
             <Button
               size="sm"
-              variant={isInstalled ? "outline" : "default"}
+              variant={isInstalled && !hasUpdate ? "outline" : "default"}
               className={cn(
                 "h-7 px-3 text-xs font-semibold rounded-none uppercase tracking-wide flex-shrink-0",
-                isInstalled && "pointer-events-none"
+                isInstalled && !hasUpdate && "pointer-events-none",
+                hasUpdate && "bg-amber-500 hover:bg-amber-600 text-white"
               )}
-              disabled={installing || isInstalled}
+              disabled={installing || (isInstalled && !hasUpdate)}
               onClick={(e) => {
                 e.stopPropagation();
                 onInstall();
@@ -859,6 +914,8 @@ function PipeCard({
             >
               {installing ? (
                 <Loader2 className="h-3 w-3 animate-spin" />
+              ) : hasUpdate ? (
+                "UPDATE"
               ) : isInstalled ? (
                 "INSTALLED"
               ) : (
@@ -916,6 +973,7 @@ function PipeDetailPanel({
   onSourceReviewedChange,
   onInstall,
   isInstalled,
+  hasUpdate,
   reviewExpanded,
   onToggleReview,
   reviewRating,
@@ -937,6 +995,7 @@ function PipeDetailPanel({
   onSourceReviewedChange: (v: boolean) => void;
   onInstall: (slug: string) => void;
   isInstalled: boolean;
+  hasUpdate?: boolean;
   reviewExpanded: boolean;
   onToggleReview: () => void;
   reviewRating: number;
@@ -1036,21 +1095,24 @@ function PipeDetailPanel({
               )}
               <Button
                 size="sm"
-                variant={isInstalled ? "outline" : "default"}
+                variant={isInstalled && !hasUpdate ? "outline" : "default"}
                 className={cn(
                   "h-9 px-5 text-sm font-semibold rounded-none uppercase tracking-wide flex-shrink-0",
-                  isInstalled && "pointer-events-none"
+                  isInstalled && !hasUpdate && "pointer-events-none",
+                  hasUpdate && "bg-amber-500 hover:bg-amber-600 text-white"
                 )}
                 disabled={
-                  installing === pipe.slug || isInstalled || (needsReview && !sourceReviewed)
+                  installing === pipe.slug || (isInstalled && !hasUpdate) || (needsReview && !sourceReviewed)
                 }
                 onClick={() => onInstall(pipe.slug)}
               >
                 {installing === pipe.slug ? (
                   <>
                     <Loader2 className="h-4 w-4 animate-spin mr-1.5" />
-                    INSTALLING...
+                    {hasUpdate ? "UPDATING..." : "INSTALLING..."}
                   </>
+                ) : hasUpdate ? (
+                  "UPDATE"
                 ) : isInstalled ? (
                   "INSTALLED"
                 ) : (
@@ -1320,21 +1382,23 @@ function redactSecrets(text: string): { redacted: string; count: number } {
   return { redacted: result, count };
 }
 
-function PublishDialog({
+export function PublishDialog({
   open,
   onOpenChange,
   token,
   onPublished,
+  defaultPipe,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   token?: string | null;
   onPublished: () => void;
+  defaultPipe?: string;
 }) {
   const { toast } = useToast();
   const [localPipes, setLocalPipes] = useState<LocalPipe[]>([]);
   const [loadingPipes, setLoadingPipes] = useState(false);
-  const [selectedPipe, setSelectedPipe] = useState("");
+  const [selectedPipe, setSelectedPipe] = useState(defaultPipe || "");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [icon, setIcon] = useState("🔧");
@@ -1344,6 +1408,7 @@ function PublishDialog({
 
   useEffect(() => {
     if (!open) return;
+    if (defaultPipe) setSelectedPipe(defaultPipe);
     setLoadingPipes(true);
     fetch("http://localhost:3030/pipes")
       .then((r) => r.json())
@@ -1353,7 +1418,7 @@ function PublishDialog({
       })
       .catch(() => setLocalPipes([]))
       .finally(() => setLoadingPipes(false));
-  }, [open]);
+  }, [open, defaultPipe]);
 
   const handlePublish = async () => {
     if (!selectedPipe || !title) return;
@@ -1488,7 +1553,7 @@ function PublishDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {CATEGORIES.filter((c) => c !== "All").map((c) => (
+                    {PUBLISH_CATEGORIES.map((c) => (
                       <SelectItem key={c} value={c}>
                         {c}
                       </SelectItem>

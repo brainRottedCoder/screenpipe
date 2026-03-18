@@ -39,8 +39,8 @@ use crate::{
         },
         meetings::{
             bulk_delete_meetings_handler, delete_meeting_handler, get_meeting_handler,
-            list_meetings_handler, merge_meetings_handler, start_meeting_handler,
-            stop_meeting_handler, update_meeting_handler,
+            list_meetings_handler, meeting_status_handler, merge_meetings_handler,
+            start_meeting_handler, stop_meeting_handler, update_meeting_handler,
         },
         memories::{
             create_memory_handler, delete_memory_handler, get_memory_handler,
@@ -187,6 +187,8 @@ pub struct SCServer {
         Arc<DashMap<String, Arc<screenpipe_core::pipes::permissions::PipePermissions>>>,
     /// Shared manual meeting lock — pass in from binary so persister and server share the same state.
     pub manual_meeting: Option<Arc<tokio::sync::RwLock<Option<i64>>>>,
+    /// In-memory notification queue for pipe notifications.
+    pub notification_queue: crate::notifications_api::SharedNotificationQueue,
 }
 
 impl SCServer {
@@ -219,6 +221,7 @@ impl SCServer {
             power_manager: None,
             pipe_permissions: Arc::new(DashMap::new()),
             manual_meeting: None,
+            notification_queue: crate::notifications_api::new_notification_queue(),
         }
     }
 
@@ -489,6 +492,7 @@ impl SCServer {
             .post("/speakers/reassign", reassign_speaker_handler)
             .post("/speakers/undo-reassign", undo_speaker_reassign_handler)
             .get("/meetings", list_meetings_handler)
+            .get("/meetings/status", meeting_status_handler)
             .post("/meetings/merge", merge_meetings_handler)
             .post("/meetings/bulk-delete", bulk_delete_meetings_handler)
             .post("/meetings/start", start_meeting_handler)
@@ -647,6 +651,14 @@ impl SCServer {
                     axum::routing::post(crate::routes::pipe_store::pipe_store_install),
                 )
                 .route(
+                    "/store/update",
+                    axum::routing::post(crate::routes::pipe_store::pipe_store_update),
+                )
+                .route(
+                    "/store/check-updates",
+                    axum::routing::get(crate::routes::pipe_store::pipe_store_check_updates),
+                )
+                .route(
                     "/store/:slug",
                     axum::routing::get(crate::routes::pipe_store::pipe_store_detail)
                         .delete(crate::routes::pipe_store::pipe_store_unpublish),
@@ -660,6 +672,26 @@ impl SCServer {
         } else {
             router
         };
+
+        // Notification routes (pipes can send notifications to the UI)
+        let nq = self.notification_queue.clone();
+        let notif_routes = Router::new()
+            .route(
+                "/",
+                axum::routing::post(crate::notifications_api::notify_handler),
+            )
+            .route(
+                "/pending",
+                axum::routing::get(crate::notifications_api::pending_notifications_handler),
+            )
+            .with_state(nq.clone());
+        let router = router
+            .nest("/notifications", notif_routes)
+            // Top-level alias: POST /notify
+            .route(
+                "/notify",
+                axum::routing::post(crate::notifications_api::notify_handler).with_state(nq),
+            );
 
         // Connections routes (pipe-facing integrations: Telegram, Slack, etc.)
         let cm: crate::connections_api::SharedConnectionManager = Arc::new(Mutex::new(

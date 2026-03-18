@@ -7,7 +7,16 @@ import React, { useState, useEffect, useCallback, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/components/ui/use-toast";
-import { Trash2, Pencil, Check, X, Loader2, GitMerge, ArrowUpDown } from "lucide-react";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  Trash2,
+  Pencil,
+  Check,
+  X,
+  Loader2,
+  GitMerge,
+  ArrowUpDown,
+} from "lucide-react";
 
 interface MeetingRecord {
   id: number;
@@ -56,16 +65,85 @@ function formatTime(iso: string): string {
   });
 }
 
+const PAGE_SIZE = 20;
+
 function toDatetimeLocal(iso: string): string {
   const d = new Date(iso);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function MeetingsSkeleton() {
+  const rows = [
+    {
+      title: "w-[34%]",
+      app: "w-16",
+      badge: "w-14",
+      time: "w-[52%]",
+    },
+    {
+      title: "w-[48%]",
+      app: "w-20",
+      badge: "w-20",
+      time: "w-[58%]",
+    },
+    {
+      title: "w-[28%]",
+      app: "w-14",
+      badge: "w-16",
+      time: "w-[46%]",
+    },
+    {
+      title: "w-[42%]",
+      app: "w-24",
+      badge: "w-[4.5rem]",
+      time: "w-[61%]",
+    },
+    {
+      title: "w-[31%]",
+      app: "w-16",
+      badge: "w-24",
+      time: "w-[49%]",
+    },
+  ];
+
+  return (
+    <div className="space-y-1.5 flex-1 overflow-y-auto pr-1">
+      {rows.map((row, index) => (
+        <div
+          key={index}
+          className="flex items-start gap-2 rounded-md border border-border p-2.5"
+        >
+          <Skeleton className="mt-1 h-4 w-4 rounded-sm" />
+
+          <div className="flex-1 min-w-0 space-y-2">
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <Skeleton className={`h-4 rounded-sm ${row.title}`} />
+              <Skeleton className={`h-3 rounded-sm ${row.app}`} />
+              <Skeleton className={`h-5 rounded-full ${row.badge}`} />
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <Skeleton className={`h-3 rounded-sm ${row.time}`} />
+              <Skeleton className="h-3 w-12 rounded-sm" />
+            </div>
+          </div>
+
+          <div className="flex items-center gap-0.5 shrink-0 pt-0.5">
+            <Skeleton className="h-7 w-7 rounded-md" />
+            <Skeleton className="h-7 w-7 rounded-md" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function MeetingsSection() {
   const { toast } = useToast();
   const [meetings, setMeetings] = useState<MeetingRecord[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [editingId, setEditingId] = useState<number | null>(null);
   const [editState, setEditState] = useState<EditState>({
@@ -79,34 +157,67 @@ export function MeetingsSection() {
   const [merging, setMerging] = useState(false);
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [sortAsc, setSortAsc] = useState(false);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const loadingMoreRef = useRef(false);
 
-  const initialLoadDone = useRef(false);
-  const fetchMeetings = useCallback(async () => {
-    if (!initialLoadDone.current) setLoading(true);
-    try {
-      const res = await fetch("http://localhost:3030/meetings?limit=100");
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data: MeetingRecord[] = await res.json();
-      setMeetings(data);
-    } catch (err) {
-      if (!initialLoadDone.current) {
-        toast({
-          title: "failed to load meetings",
-          description: String(err),
-          variant: "destructive",
-        });
+  const fetchPage = useCallback(
+    async (offset: number, append: boolean) => {
+      if (offset === 0) setLoading(true);
+      else {
+        setLoadingMore(true);
+        loadingMoreRef.current = true;
       }
-    } finally {
-      setLoading(false);
-      initialLoadDone.current = true;
-    }
-  }, [toast]);
+
+      try {
+        const res = await fetch(
+          `http://localhost:3030/meetings?limit=${PAGE_SIZE}&offset=${offset}`,
+        );
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data: MeetingRecord[] = await res.json();
+        if (data.length < PAGE_SIZE) setHasMore(false);
+        setMeetings((prev) => (append ? [...prev, ...data] : data));
+      } catch (err) {
+        if (offset === 0) {
+          toast({
+            title: "failed to load meetings",
+            description: String(err),
+            variant: "destructive",
+          });
+        }
+      } finally {
+        setLoading(false);
+        setLoadingMore(false);
+        loadingMoreRef.current = false;
+      }
+    },
+    [toast],
+  );
 
   useEffect(() => {
-    fetchMeetings();
-    const interval = setInterval(fetchMeetings, 10000);
-    return () => clearInterval(interval);
-  }, [fetchMeetings]);
+    fetchPage(0, false);
+  }, [fetchPage]);
+
+  // infinite scroll
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (
+          entries[0].isIntersecting &&
+          !loadingMoreRef.current &&
+          hasMore
+        ) {
+          fetchPage(meetings.length, true);
+        }
+      },
+      { root: scrollRef.current, threshold: 0 },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [meetings.length, hasMore, fetchPage]);
 
   const sortedMeetings = React.useMemo(() => {
     if (!sortAsc) return meetings;
@@ -155,7 +266,8 @@ export function MeetingsSection() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({ title: "meeting updated" });
       setEditingId(null);
-      await fetchMeetings();
+      setHasMore(true);
+      await fetchPage(0, false);
     } catch (err) {
       toast({
         title: "failed to update meeting",
@@ -176,12 +288,12 @@ export function MeetingsSection() {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({ title: "meeting deleted" });
+      setMeetings((prev) => prev.filter((m) => m.id !== id));
       setSelected((prev) => {
         const next = new Set(prev);
         next.delete(id);
         return next;
       });
-      await fetchMeetings();
     } catch (err) {
       toast({
         title: "failed to delete meeting",
@@ -206,7 +318,8 @@ export function MeetingsSection() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({ title: "meetings merged" });
       setSelected(new Set());
-      await fetchMeetings();
+      setHasMore(true);
+      await fetchPage(0, false);
     } catch (err) {
       toast({
         title: "failed to merge meetings",
@@ -231,7 +344,8 @@ export function MeetingsSection() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       toast({ title: `${ids.length} meeting(s) deleted` });
       setSelected(new Set());
-      await fetchMeetings();
+      setHasMore(true);
+      await fetchPage(0, false);
     } catch (err) {
       toast({
         title: "failed to delete meetings",
@@ -246,16 +360,20 @@ export function MeetingsSection() {
   return (
     <div className="space-y-4 h-full flex flex-col">
       <div className="flex items-center justify-end">
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={() => setSortAsc((v) => !v)}
-          className="gap-1.5 text-xs"
-          title={sortAsc ? "sort newest first" : "sort oldest first"}
-        >
-          <ArrowUpDown className="h-3.5 w-3.5" />
-          {sortAsc ? "oldest first" : "newest first"}
-        </Button>
+        {loading ? (
+          <Skeleton className="h-8 w-28 rounded-md" />
+        ) : (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setSortAsc((v) => !v)}
+            className="gap-1.5 text-xs"
+            title={sortAsc ? "sort newest first" : "sort oldest first"}
+          >
+            <ArrowUpDown className="h-3.5 w-3.5" />
+            {sortAsc ? "oldest first" : "newest first"}
+          </Button>
+        )}
       </div>
 
       {/* Bulk actions */}
@@ -296,14 +414,14 @@ export function MeetingsSection() {
 
       {/* List */}
       {loading ? (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground py-8">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          loading meetings…
-        </div>
+        <MeetingsSkeleton />
       ) : meetings.length === 0 ? (
         <p className="text-sm text-muted-foreground py-8">no meetings found</p>
       ) : (
-        <div className="space-y-1.5 flex-1 overflow-y-auto pr-1">
+        <div
+          ref={scrollRef}
+          className="space-y-1.5 flex-1 overflow-y-auto pr-1"
+        >
           {sortedMeetings.map((meeting) => {
             const isEditing = editingId === meeting.id;
             const isSaving = savingId === meeting.id;
@@ -399,7 +517,12 @@ export function MeetingsSection() {
                           </span>
                         )}
                         <span className="ml-1.5 text-muted-foreground/60">
-                          ({formatDuration(meeting.meeting_start, meeting.meeting_end)})
+                          (
+                          {formatDuration(
+                            meeting.meeting_start,
+                            meeting.meeting_end,
+                          )}
+                          )
                         </span>
                       </div>
                     </>
@@ -494,6 +617,13 @@ export function MeetingsSection() {
               </div>
             );
           })}
+
+          {/* sentinel + loading more indicator */}
+          <div ref={sentinelRef} className="py-2 flex justify-center">
+            {loadingMore && (
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+            )}
+          </div>
         </div>
       )}
     </div>
