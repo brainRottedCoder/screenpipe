@@ -67,9 +67,7 @@ pub enum CallSignal {
     /// Match a menu bar item by exact title (case-insensitive).
     /// Used for apps like Zoom that expose meeting controls only via
     /// AXMenuBarItem/AXMenuItem in the menu bar, not as AXButton in windows.
-    MenuBarItem {
-        title_contains: &'static str,
-    },
+    MenuBarItem { title_contains: &'static str },
     /// Match an AXMenuItem by its automation ID (AXIdentifier).
     /// Zoom exposes identifiers like "onMuteAudio:", "onMuteVideo:" on menu items.
     MenuItemId(&'static str),
@@ -77,6 +75,8 @@ pub enum CallSignal {
     /// the text, regardless of control type. Use as a last-resort fallback
     /// when apps expose meeting controls with non-standard roles.
     NameContains(&'static str),
+    /// Explicit indicator that the meeting has just been left or ended.
+    LeaveIndicator(&'static str),
 }
 
 /// Per-app detection configuration.
@@ -92,6 +92,11 @@ pub struct MeetingDetectionProfile {
     pub call_signals: Vec<CallSignal>,
     /// Minimum number of distinct signals required (typically 1 for leave/hangup).
     pub min_signals_required: usize,
+    /// AX tree signals that indicate user has LEFT the meeting.
+    /// These are transitional UI elements like "You left the meeting", "Call ended",
+    /// rejoin buttons, or post-call summary screens.
+    /// When detected during Ending state, the meeting ends immediately.
+    pub leave_signals: Vec<CallSignal>,
 }
 
 /// Load all built-in detection profiles.
@@ -99,6 +104,11 @@ pub struct MeetingDetectionProfile {
 /// Signal design: only leave/hangup/end-call buttons are standalone signals.
 /// Mute is NOT included as a standalone signal because it appears in pre-join
 /// lobbies, Slack chat, and other non-meeting contexts.
+///
+/// Leave signals are transitional UI elements that appear after the user has left
+/// a meeting (e.g., "You left the meeting", "Call ended", "Rejoin" button).
+/// When detected during Ending state, the meeting ends immediately instead of
+/// waiting for the full timeout.
 pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
     vec![
         // Microsoft Teams Desktop
@@ -125,6 +135,13 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 CallSignal::NameContains("leave"),
             ],
             min_signals_required: 1,
+            leave_signals: vec![
+                // Teams shows "You left the meeting" after leaving
+                CallSignal::NameContains("you left"),
+                CallSignal::NameContains("rejoin"),
+                // Post-meeting summary
+                CallSignal::NameContains("meeting ended"),
+            ],
         },
         // Zoom Desktop
         // Note: Zoom on macOS does NOT expose AXWindow — only AXMenuBar.
@@ -160,6 +177,12 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 },
             ],
             min_signals_required: 1,
+            leave_signals: vec![
+                // Zoom shows "You left the meeting" after leaving
+                CallSignal::NameContains("you left"),
+                CallSignal::NameContains("rejoin meeting"),
+                CallSignal::NameContains("return to meeting"),
+            ],
         },
         // Google Meet (browser)
         MeetingDetectionProfile {
@@ -184,6 +207,12 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 CallSignal::NameContains("leave call"),
             ],
             min_signals_required: 1,
+            leave_signals: vec![
+                // Google Meet shows "Call ended" after leaving
+                CallSignal::NameContains("call ended"),
+                CallSignal::NameContains("you left"),
+                CallSignal::NameContains("rejoin call"),
+            ],
         },
         // Slack Huddle (browser + desktop)
         MeetingDetectionProfile {
@@ -203,6 +232,10 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 },
             ],
             min_signals_required: 1,
+            leave_signals: vec![
+                CallSignal::NameContains("huddle ended"),
+                CallSignal::NameContains("you left"),
+            ],
         },
         // FaceTime
         MeetingDetectionProfile {
@@ -222,6 +255,7 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 },
             ],
             min_signals_required: 1,
+            leave_signals: vec![],
         },
         // Webex
         MeetingDetectionProfile {
@@ -242,6 +276,11 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 },
             ],
             min_signals_required: 1,
+            leave_signals: vec![
+                CallSignal::NameContains("you left"),
+                CallSignal::NameContains("meeting ended"),
+                CallSignal::NameContains("rejoin"),
+            ],
         },
         // Discord native (macOS + Windows)
         // Native macOS: Electron exposes 0 windows but menu bar has "Mute"/"Deafen"
@@ -271,6 +310,7 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 CallSignal::NameContains("Disconnect"),
             ],
             min_signals_required: 1,
+            leave_signals: vec![],
         },
         // Discord in browser — only match signals specific to active voice channels.
         // The "Voice Connected" bar and "Disconnect" button only appear when in a call.
@@ -289,6 +329,11 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 },
             ],
             min_signals_required: 1,
+            leave_signals: vec![
+                // Discord shows "You’re not in a voice channel" or similar after leaving
+                CallSignal::NameContains("not in a voice channel"),
+                CallSignal::NameContains("voice channel"),
+            ],
         },
         // Generic fallback — catches apps like Skype, Around, Whereby, etc.
         MeetingDetectionProfile {
@@ -380,6 +425,14 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
                 },
             ],
             min_signals_required: 1,
+            leave_signals: vec![
+                // Generic leave/ended indicators
+                CallSignal::NameContains("you left"),
+                CallSignal::NameContains("call ended"),
+                CallSignal::NameContains("meeting ended"),
+                CallSignal::NameContains("rejoin"),
+                CallSignal::NameContains("return to"),
+            ],
         },
     ]
 }
@@ -391,6 +444,8 @@ pub fn load_detection_profiles() -> Vec<MeetingDetectionProfile> {
 /// Result of scanning a single app for call control signals.
 #[derive(Debug, Clone)]
 pub struct ScanResult {
+    /// Process ID of the scanned app.
+    pub pid: i32,
     /// App name that was scanned.
     pub app_name: String,
     /// Which profile matched.
@@ -401,6 +456,11 @@ pub struct ScanResult {
     pub is_in_call: bool,
     /// Which signals were matched (for debugging).
     pub matched_signals: Vec<String>,
+    /// Whether leave/ended signals were detected (indicates user left the meeting).
+    /// When true and state is Ending, the meeting ends immediately.
+    pub leave_signal_detected: bool,
+    /// Which leave signals were matched (for debugging).
+    pub matched_leave_signals: Vec<String>,
 }
 
 // ============================================================================
@@ -460,6 +520,13 @@ impl MeetingUiScanner {
         let precomputed = PrecomputedSignal::from_signals(&profile.call_signals);
         let min_required = profile.min_signals_required;
 
+        // Precompute leave signals if profile has any
+        let leave_precomputed = if !profile.leave_signals.is_empty() {
+            Some(PrecomputedSignal::from_signals(&profile.leave_signals))
+        } else {
+            None
+        };
+
         // Wrap in catch_unwind to survive cidre/ObjC FFI panics
         let scan_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             cidre::objc::ar_pool(|| -> Vec<String> {
@@ -496,8 +563,14 @@ impl MeetingUiScanner {
 
                     // Walk this window's AX tree looking for signals
                     walk_for_signals(
-                        window, &precomputed, 0, max_depth, &start, scan_timeout,
-                        &mut found, min_required,
+                        window,
+                        &precomputed,
+                        0,
+                        max_depth,
+                        &start,
+                        scan_timeout,
+                        &mut found,
+                        min_required,
                     );
 
                     if found.len() >= min_required {
@@ -508,6 +581,54 @@ impl MeetingUiScanner {
                 found
             })
         }));
+
+        // Also scan for leave signals
+        let leave_scan_result = if let Some(ref leave_precomputed) = leave_precomputed {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                cidre::objc::ar_pool(|| -> Vec<String> {
+                    let start = Instant::now();
+                    let ax_app = cidre::ax::UiElement::with_app_pid(pid);
+                    let _ = ax_app.set_messaging_timeout_secs(0.5);
+
+                    let windows = match ax_app.children() {
+                        Ok(w) => w,
+                        Err(_) => return Vec::new(),
+                    };
+
+                    let mut leave_found = Vec::new();
+
+                    for i in 0..windows.len() {
+                        if start.elapsed() >= scan_timeout {
+                            break;
+                        }
+
+                        let window = &windows[i];
+                        let _ = window.set_messaging_timeout_secs(0.3);
+
+                        // Walk this window's AX tree looking for leave signals
+                        walk_for_signals(
+                            window,
+                            leave_precomputed,
+                            0,
+                            max_depth,
+                            &start,
+                            scan_timeout,
+                            &mut leave_found,
+                            1, // only need 1 leave signal
+                        );
+
+                        if !leave_found.is_empty() {
+                            break;
+                        }
+                    }
+
+                    leave_found
+                })
+            }))
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
         let matched_signals = match scan_result {
             Ok(signals) => signals,
@@ -530,17 +651,25 @@ impl MeetingUiScanner {
         let signals_found = matched_signals.len();
         let is_in_call = signals_found >= profile.min_signals_required;
 
+        // Check for leave signals
+        let leave_signal_detected = !leave_scan_result.is_empty();
+        let matched_leave_signals = leave_scan_result;
+
         debug!(
-            "meeting scanner: pid={} app={} signals={} in_call={} matched={:?}",
+            "meeting scanner: pid={} app={} signals={} in_call={} matched={:?} leave_detected={} leave_signals={:?}",
             pid, app_name, signals_found, is_in_call, matched_signals,
+            leave_signal_detected, matched_leave_signals,
         );
 
         ScanResult {
+            pid,
             app_name,
             profile_index: 0, // overwritten by caller
             signals_found,
             is_in_call,
             matched_signals,
+            leave_signal_detected,
+            matched_leave_signals,
         }
     }
 
@@ -578,17 +707,34 @@ impl MeetingUiScanner {
         let signals_found = matched_signals.len();
         let is_in_call = signals_found >= profile.min_signals_required;
 
+        // Also scan for leave signals on Windows
+        let leave_signals = profile.leave_signals.clone();
+        let leave_scan_result = if !leave_signals.is_empty() {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                windows_scan_process_uia(pid, &leave_signals, 1, max_depth, scan_timeout)
+            }))
+            .unwrap_or(Ok(Vec::new()))
+            .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
+        let leave_signal_detected = !leave_scan_result.is_empty();
+
         info!(
-            "meeting scanner: pid={} app={} signals={} in_call={} matched={:?}",
-            pid, app_name, signals_found, is_in_call, matched_signals,
+            "meeting scanner: pid={} app={} signals={} in_call={} matched={:?} leave_detected={}",
+            pid, app_name, signals_found, is_in_call, matched_signals, leave_signal_detected,
         );
 
         ScanResult {
+            pid,
             app_name,
             profile_index: 0,
             signals_found,
             is_in_call,
             matched_signals,
+            leave_signal_detected,
+            matched_leave_signals: leave_scan_result,
         }
     }
 
@@ -598,11 +744,14 @@ impl MeetingUiScanner {
         let _ = profile;
         let app_name = format!("pid:{}", pid);
         ScanResult {
+            pid,
             app_name,
             profile_index: 0,
             signals_found: 0,
             is_in_call: false,
             matched_signals: Vec::new(),
+            leave_signal_detected: false,
+            matched_leave_signals: Vec::new(),
         }
     }
 }
@@ -655,7 +804,8 @@ fn walk_for_signals(
             desc_lower.as_deref(),
             ident_lower.as_deref(),
         ) {
-            let label = format_signal_match(&ps.signal, &role_str, title.as_deref(), desc.as_deref());
+            let label =
+                format_signal_match(&ps.signal, &role_str, title.as_deref(), desc.as_deref());
             if !found.contains(&label) {
                 found.push(label);
             }
@@ -686,7 +836,14 @@ fn walk_for_signals(
             }
             let child = &children[i];
             walk_for_signals(
-                child, signals, depth + 1, max_depth, start, timeout, found, min_required,
+                child,
+                signals,
+                depth + 1,
+                max_depth,
+                start,
+                timeout,
+                found,
+                min_required,
             );
         }
     }
@@ -712,6 +869,7 @@ impl PrecomputedSignal {
                     CallSignal::MenuBarItem { title_contains } => title_contains.to_lowercase(),
                     CallSignal::MenuItemId(id) => id.to_string(),
                     CallSignal::NameContains(name) => name.to_lowercase(),
+                    CallSignal::LeaveIndicator(name) => name.to_lowercase(),
                 };
                 PrecomputedSignal {
                     signal: s.clone(),
@@ -728,6 +886,15 @@ impl PrecomputedSignal {
 /// `check_signal_match` entry point. For the optimized hot path, use
 /// `check_signal_match_precomputed` with pre-lowercased values.
 #[cfg(any(target_os = "windows", test))]
+
+/// Helper to check if a needle string exists in either the title or description
+fn matches_text_agnostic(title: Option<&str>, desc: Option<&str>, needle: &str) -> bool {
+    let in_title = title.map_or(false, |t| t.contains(needle));
+    let in_desc = desc.map_or(false, |d| d.contains(needle));
+    in_title || in_desc
+}
+
+#[cfg(any(target_os = "windows", test))]
 fn check_signal_match(
     signal: &CallSignal,
     role: &str,
@@ -736,7 +903,9 @@ fn check_signal_match(
     identifier: Option<&str>,
 ) -> bool {
     match signal {
-        CallSignal::AutomationId(id) => identifier.map_or(false, |ident| ident.eq_ignore_ascii_case(id)),
+        CallSignal::AutomationId(id) => {
+            identifier.map_or(false, |ident| ident.eq_ignore_ascii_case(id))
+        }
         CallSignal::AutomationIdContains(substr) => identifier.map_or(false, |ident| {
             ident.to_lowercase().contains(&substr.to_lowercase())
         }),
@@ -773,12 +942,16 @@ fn check_signal_match(
             }
             identifier.map_or(false, |ident| ident == *expected_id)
         }
-        CallSignal::NameContains(needle) => {
-            let needle_lower = needle.to_lowercase();
-            let in_title = title.map_or(false, |t| t.to_lowercase().contains(&needle_lower));
-            let in_desc = desc.map_or(false, |d| d.to_lowercase().contains(&needle_lower));
-            in_title || in_desc
-        }
+        CallSignal::NameContains(needle) => matches_text_agnostic(
+            title.map(|s| s.to_lowercase()).as_deref(),
+            desc.map(|s| s.to_lowercase()).as_deref(),
+            &needle.to_lowercase(),
+        ),
+        CallSignal::LeaveIndicator(name) => matches_text_agnostic(
+            title.map(|s| s.to_lowercase()).as_deref(),
+            desc.map(|s| s.to_lowercase()).as_deref(),
+            &name.to_lowercase(),
+        ),
     }
 }
 
@@ -823,11 +996,8 @@ fn check_signal_match_precomputed(
             }
             identifier_lower.map_or(false, |ident| ident == &ps.lower[..])
         }
-        CallSignal::NameContains(_) => {
-            // Role-agnostic: match any element whose title or description contains the text
-            let in_title = title_lower.map_or(false, |t| t.contains(&ps.lower[..]));
-            let in_desc = desc_lower.map_or(false, |d| d.contains(&ps.lower[..]));
-            in_title || in_desc
+        CallSignal::NameContains(_) | CallSignal::LeaveIndicator(_) => {
+            matches_text_agnostic(title_lower, desc_lower, &ps.lower)
         }
     }
 }
@@ -855,6 +1025,10 @@ fn format_signal_match(
         CallSignal::NameContains(name) => {
             let label = title.or(desc).unwrap_or("?");
             format!("name_contains={} ({})", name, label)
+        }
+        CallSignal::LeaveIndicator(name) => {
+            let label = title.or(desc).unwrap_or("?");
+            format!("leave_indicator={} ({})", name, label)
         }
     }
 }
@@ -945,7 +1119,11 @@ fn windows_enumerate_processes() -> Vec<WindowsProcessInfo> {
         if Process32FirstW(snapshot, &mut entry).is_ok() {
             loop {
                 let name = String::from_utf16_lossy(
-                    &entry.szExeFile[..entry.szExeFile.iter().position(|&c| c == 0).unwrap_or(entry.szExeFile.len())]
+                    &entry.szExeFile[..entry
+                        .szExeFile
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(entry.szExeFile.len())],
                 );
                 results.push(WindowsProcessInfo {
                     pid: entry.th32ProcessID,
@@ -976,11 +1154,11 @@ fn windows_get_process_name(pid: i32) -> Option<String> {
 /// Enumerate visible window titles and their PIDs on Windows.
 #[cfg(target_os = "windows")]
 fn windows_enumerate_window_titles() -> Vec<(i32, String)> {
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
     };
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use std::sync::Mutex;
 
     let results: Arc<Mutex<Vec<(i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
     let results_clone = results.clone();
@@ -1010,23 +1188,25 @@ fn windows_enumerate_window_titles() -> Vec<(i32, String)> {
         );
     }
 
-    Arc::try_unwrap(results).unwrap_or_default().into_inner().unwrap_or_default()
+    Arc::try_unwrap(results)
+        .unwrap_or_default()
+        .into_inner()
+        .unwrap_or_default()
 }
 
 /// Enumerate visible windows belonging to a specific PID.
 #[cfg(target_os = "windows")]
 fn enumerate_windows_for_pid(target_pid: u32) -> Vec<windows::Win32::Foundation::HWND> {
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
     };
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use std::sync::Mutex;
 
     let param_data = (target_pid, Mutex::new(Vec::<HWND>::new()));
 
     unsafe extern "system" fn enum_for_pid(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let (target_pid, hwnds) =
-            &*(lparam.0 as *const (u32, Mutex<Vec<HWND>>));
+        let (target_pid, hwnds) = &*(lparam.0 as *const (u32, Mutex<Vec<HWND>>));
 
         if IsWindowVisible(hwnd).as_bool() {
             let mut win_pid: u32 = 0;
@@ -1068,7 +1248,7 @@ fn windows_scan_process_uia(
     };
     use windows::Win32::UI::Accessibility::{
         CUIAutomation, IUIAutomation, IUIAutomationCondition, TreeScope_Descendants,
-        UIA_NamePropertyId, UIA_AutomationIdPropertyId,
+        UIA_AutomationIdPropertyId, UIA_NamePropertyId,
     };
 
     unsafe {
@@ -1090,7 +1270,11 @@ fn windows_scan_process_uia(
                         conditions.push(cond);
                     }
                 }
-                CallSignal::NameContains(name) | CallSignal::RoleWithName { name_contains: name, .. } => {
+                CallSignal::NameContains(name)
+                | CallSignal::RoleWithName {
+                    name_contains: name,
+                    ..
+                } => {
                     // UIA PropertyCondition doesn't support substring match,
                     // so we search for exact name. For "leave"/"hang up" this works
                     // because the button name IS the keyword.
@@ -1129,9 +1313,7 @@ fn windows_scan_process_uia(
                     // Build OR condition from all individual conditions
                     let first: IUIAutomationCondition = conditions[0].clone().into();
                     let second: IUIAutomationCondition = conditions[1].clone().into();
-                    let mut combined = automation
-                        .CreateOrCondition(&first, &second)
-                        .ok();
+                    let mut combined = automation.CreateOrCondition(&first, &second).ok();
                     for cond in &conditions[2..] {
                         if let Some(ref prev) = combined {
                             let prev_cond: IUIAutomationCondition = prev.clone().into();
@@ -1154,18 +1336,26 @@ fn windows_scan_process_uia(
                             if let Ok(el) = results.GetElement(i) {
                                 let name = el.CurrentName().ok().map(|s| s.to_string());
                                 let auto_id = el.CurrentAutomationId().ok().map(|s| s.to_string());
-                                let role = el.CurrentLocalizedControlType()
-                                    .ok().map(|s| s.to_string()).unwrap_or_default();
+                                let role = el
+                                    .CurrentLocalizedControlType()
+                                    .ok()
+                                    .map(|s| s.to_string())
+                                    .unwrap_or_default();
 
                                 // Verify this element actually matches one of our signals
                                 for signal in signals {
                                     if check_signal_match(
-                                        signal, &role,
-                                        name.as_deref(), None,
+                                        signal,
+                                        &role,
+                                        name.as_deref(),
+                                        None,
                                         auto_id.as_deref(),
                                     ) {
                                         let label = format_signal_match(
-                                            signal, &role, name.as_deref(), None,
+                                            signal,
+                                            &role,
+                                            name.as_deref(),
+                                            None,
                                         );
                                         if !found.contains(&label) {
                                             found.push(label);
@@ -1175,12 +1365,17 @@ fn windows_scan_process_uia(
                                     // Also check with AX prefix for cross-platform compat
                                     let ax_role = format!("AX{}", role);
                                     if check_signal_match(
-                                        signal, &ax_role,
-                                        name.as_deref(), None,
+                                        signal,
+                                        &ax_role,
+                                        name.as_deref(),
+                                        None,
                                         auto_id.as_deref(),
                                     ) {
                                         let label = format_signal_match(
-                                            signal, &role, name.as_deref(), None,
+                                            signal,
+                                            &role,
+                                            name.as_deref(),
+                                            None,
                                         );
                                         if !found.contains(&label) {
                                             found.push(label);
@@ -1224,6 +1419,7 @@ pub enum MeetingState {
         since: Instant,
         app: String,
         profile_index: usize,
+        pid: i32,
     },
     /// Meeting is in progress.
     Active {
@@ -1231,6 +1427,12 @@ pub enum MeetingState {
         app: String,
         started_at: DateTime<Utc>,
         last_seen: Instant,
+        /// Track if we had controls in the previous scan.
+        /// Used to determine if controls vanished completely (fast end)
+        /// vs intermittent flicker (full timeout).
+        had_controls_last_scan: bool,
+        profile_index: usize,
+        pid: i32,
     },
     /// Meeting controls disappeared — waiting before marking ended.
     Ending {
@@ -1238,6 +1440,11 @@ pub enum MeetingState {
         app: String,
         started_at: DateTime<Utc>,
         since: Instant,
+        /// Track if this was a "clean" exit (process exit or leave signals).
+        /// When true, use fast-end timeout instead of full 30s timeout.
+        instant_end: bool,
+        profile_index: usize,
+        pid: i32,
     },
 }
 
@@ -1246,9 +1453,9 @@ impl MeetingState {
     pub fn name(&self) -> &'static str {
         match self {
             MeetingState::Idle => "Idle",
-            MeetingState::Confirming { .. } => "Confirming",
-            MeetingState::Active { .. } => "Active",
-            MeetingState::Ending { .. } => "Ending",
+            MeetingState::Confirming(ConfirmingState { .. }) => "Confirming",
+            MeetingState::Active(ActiveState { .. }) => "Active",
+            MeetingState::Ending(EndingState { .. }) => "Ending",
         }
     }
 }
@@ -1259,19 +1466,30 @@ const CONFIRM_TIMEOUT: Duration = Duration::from_secs(15);
 /// Timeout for ending a meeting (how long controls must be absent before we end).
 const ENDING_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Fast timeout when user definitely left (process exit or leave signals detected).
+/// This is used when controls vanished completely (not intermittent flicker)
+/// or when leave/ended UI is detected.
+const FAST_ENDING_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Advance the state machine based on scan results.
 ///
 /// Returns the new state plus an optional action to perform (DB insert/update).
 /// This function is pure — it does not perform side effects, making it easy to test.
+///
+/// The `profiles` parameter is used to check for leave signals when in Ending state.
 pub fn advance_state(
     state: MeetingState,
     scan_results: &[ScanResult],
+    _profiles: &[MeetingDetectionProfile],
 ) -> (MeetingState, Option<StateAction>) {
     // Find the best scan result (one that found the most signals and is in-call)
     let best_active = scan_results
         .iter()
         .filter(|r| r.is_in_call)
         .max_by_key(|r| r.signals_found);
+
+    // Check if any scan result detected leave signals
+    let leave_signal_detected = scan_results.iter().any(|r| r.leave_signal_detected);
 
     match state {
         MeetingState::Idle => {
@@ -1281,11 +1499,12 @@ pub fn advance_state(
                     result.app_name, result.signals_found
                 );
                 (
-                    MeetingState::Confirming {
+                    MeetingState::Confirming(ConfirmingState {
                         since: Instant::now(),
                         app: result.app_name.clone(),
                         profile_index: result.profile_index,
-                    },
+                        pid: result.pid,
+                    }),
                     None,
                 )
             } else {
@@ -1293,11 +1512,12 @@ pub fn advance_state(
             }
         }
 
-        MeetingState::Confirming {
+        MeetingState::Confirming(ConfirmingState {
             since,
             app,
             profile_index,
-        } => {
+            pid,
+        }) => {
             if let Some(result) = best_active {
                 info!(
                     "meeting v2: Confirming -> Active (app={}, signals={})",
@@ -1305,12 +1525,16 @@ pub fn advance_state(
                 );
                 (
                     // meeting_id=-1 is a placeholder; the loop fills it after DB insert
-                    MeetingState::Active {
+                    MeetingState::Active(ActiveState {
                         meeting_id: -1,
                         app: result.app_name.clone(),
                         started_at: Utc::now(),
                         last_seen: Instant::now(),
-                    },
+                        // First confirmed detection - assume we had controls
+                        had_controls_last_scan: true,
+                        profile_index: result.profile_index,
+                        pid: result.pid,
+                    }),
                     Some(StateAction::StartMeeting {
                         app: result.app_name.clone(),
                     }),
@@ -1325,97 +1549,147 @@ pub fn advance_state(
                     since.elapsed()
                 );
                 (
-                    MeetingState::Confirming {
+                    MeetingState::Confirming(ConfirmingState {
                         since,
                         app,
                         profile_index,
-                    },
+                        pid,
+                    }),
                     None,
                 )
             }
         }
 
-        MeetingState::Active {
+        MeetingState::Active(ActiveState {
             meeting_id,
             app,
             started_at,
-            ..
-        } => {
+            last_seen: _,
+            had_controls_last_scan,
+            profile_index,
+            pid,
+        }) => {
             if let Some(result) = best_active {
                 debug!(
                     "meeting v2: Active (app={}, signals={}, id={})",
                     result.app_name, result.signals_found, meeting_id
                 );
                 (
-                    MeetingState::Active {
+                    MeetingState::Active(ActiveState {
                         meeting_id,
                         app: result.app_name.clone(),
                         started_at,
                         last_seen: Instant::now(),
-                    },
+                        // We have controls now
+                        had_controls_last_scan: true,
+                        profile_index: result.profile_index,
+                        pid: result.pid,
+                    }),
                     None,
                 )
             } else {
+                // Controls disappeared - determine if this is a "clean" exit
+                // If we had controls in the last scan and now they're completely gone,
+                // it's likely a clean exit (user left) vs intermittent flicker (tab switch)
+                let instant_end = had_controls_last_scan;
                 info!(
-                    "meeting v2: Active -> Ending (no controls, app={}, id={})",
-                    app, meeting_id
+                    "meeting v2: Active -> Ending (no controls, app={}, id={}, instant_end={})",
+                    app, meeting_id, instant_end
                 );
                 (
-                    MeetingState::Ending {
+                    MeetingState::Ending(EndingState {
                         meeting_id,
                         app,
                         started_at,
                         since: Instant::now(),
-                    },
+                        instant_end,
+                        profile_index,
+                        pid,
+                    }),
                     None,
                 )
             }
         }
 
-        MeetingState::Ending {
+        MeetingState::Ending(EndingState {
             meeting_id,
             app,
             started_at,
             since,
-        } => {
+            instant_end,
+            profile_index,
+            pid,
+        }) => {
             if let Some(result) = best_active {
                 info!(
                     "meeting v2: Ending -> Active (controls reappeared, app={}, id={})",
                     result.app_name, meeting_id
                 );
                 (
-                    MeetingState::Active {
+                    MeetingState::Active(ActiveState {
                         meeting_id,
                         app: result.app_name.clone(),
                         started_at, // preserve original start time
                         last_seen: Instant::now(),
-                    },
+                        // Controls are back
+                        had_controls_last_scan: true,
+                        profile_index: result.profile_index,
+                        pid: result.pid,
+                    }),
                     None,
-                )
-            } else if since.elapsed() >= ENDING_TIMEOUT {
-                info!(
-                    "meeting v2: Ending -> Idle (timeout, app={}, id={})",
-                    app, meeting_id
-                );
-                (
-                    MeetingState::Idle,
-                    Some(StateAction::EndMeeting { meeting_id }),
                 )
             } else {
-                debug!(
-                    "meeting v2: Ending (app={}, id={}, elapsed={:?})",
-                    app, meeting_id,
-                    since.elapsed()
-                );
-                (
-                    MeetingState::Ending {
-                        meeting_id,
+                // Check for leave signals - if detected, end immediately
+                if leave_signal_detected {
+                    info!(
+                        "meeting v2: Ending -> Idle (leave signal detected, app={}, id={})",
+                        app, meeting_id
+                    );
+                    return (
+                        MeetingState::Idle,
+                        Some(StateAction::EndMeeting { meeting_id }),
+                    );
+                }
+
+                // Determine which timeout to use based on how we entered Ending state.
+                // instant_end=true  → controls vanished cleanly (user left) → 5s fast timeout.
+                // instant_end=false → possible tab switch / transient glitch → 30s full timeout.
+                let timeout = if instant_end {
+                    FAST_ENDING_TIMEOUT
+                } else {
+                    ENDING_TIMEOUT
+                };
+
+                if since.elapsed() >= timeout {
+                    info!(
+                        "meeting v2: Ending -> Idle (timeout after {:?}, app={}, id={})",
+                        timeout, app, meeting_id
+                    );
+                    (
+                        MeetingState::Idle,
+                        Some(StateAction::EndMeeting { meeting_id }),
+                    )
+                } else {
+                    debug!(
+                        "meeting v2: Ending (app={}, id={}, elapsed={:?}, timeout={:?})",
                         app,
-                        started_at,
-                        since,
-                    },
-                    None,
-                )
+                        meeting_id,
+                        since.elapsed(),
+                        timeout
+                    );
+                    (
+                        MeetingState::Ending(EndingState {
+                            meeting_id,
+                            app,
+                            started_at,
+                            since,
+                            instant_end, // preserve original flag across ticks
+                            profile_index,
+                            pid,
+                        }),
+                        None,
+                    )
+                }
             }
         }
     }
@@ -1446,22 +1720,6 @@ pub struct RunningMeetingApp {
     /// For browser-based meetings, the URL found in the window title.
     pub browser_url: Option<String>,
 }
-
-/// Known browser app names (lowercase).
-const BROWSER_NAMES: &[&str] = &[
-    "google chrome",
-    "arc",
-    "firefox",
-    "safari",
-    "microsoft edge",
-    "brave browser",
-    "chromium",
-    "opera",
-    "vivaldi",
-    "zen browser",
-    "orion",
-    "floorp",
-];
 
 /// Find running processes that match any meeting detection profile.
 ///
@@ -1531,10 +1789,7 @@ pub fn find_running_meeting_apps(
                 if !profile.app_identifiers.browser_url_patterns.is_empty()
                     && BROWSER_NAMES.iter().any(|b| name_lower.contains(b))
                 {
-                    if has_browser_meeting_url(
-                        pid,
-                        &profile.app_identifiers.browser_url_patterns,
-                    ) {
+                    if has_browser_meeting_url(pid, &profile.app_identifiers.browser_url_patterns) {
                         results.push(RunningMeetingApp {
                             pid,
                             app_name: name.clone(),
@@ -1610,14 +1865,7 @@ pub fn find_running_meeting_apps(
     profiles: &[MeetingDetectionProfile],
     currently_tracking: Option<&ActiveTracking>,
 ) -> Vec<RunningMeetingApp> {
-    use windows::Win32::System::Threading::{
-        OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    };
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    };
-    use windows::Win32::Foundation::{BOOL, HWND, LPARAM};
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
 
     let mut results = Vec::new();
     let mut seen_pids = HashSet::new();
@@ -1630,7 +1878,8 @@ pub fn find_running_meeting_apps(
         if process_map.iter().any(|p| p.pid == tracking.pid as u32) {
             results.push(RunningMeetingApp {
                 pid: tracking.pid,
-                app_name: process_map.iter()
+                app_name: process_map
+                    .iter()
                     .find(|p| p.pid == tracking.pid as u32)
                     .map(|p| p.name.clone())
                     .unwrap_or_else(|| format!("pid:{}", tracking.pid)),
@@ -1664,14 +1913,13 @@ pub fn find_running_meeting_apps(
                 // Also add child processes that render UI (Teams uses msedgewebview2.exe).
                 // Only include known UI-hosting children to avoid scanning 10-15+ GPU/utility
                 // worker processes that would each block for 2s+ on timeout.
-                const UI_CHILD_PROCESS_NAMES: &[&str] = &[
-                    "msedgewebview2.exe",
-                    "webview2.exe",
-                ];
+                const UI_CHILD_PROCESS_NAMES: &[&str] = &["msedgewebview2.exe", "webview2.exe"];
                 for child in process_map.iter() {
                     if child.parent_pid == proc.pid
                         && !seen_pids.contains(&(child.pid as i32))
-                        && UI_CHILD_PROCESS_NAMES.iter().any(|n| child.name.eq_ignore_ascii_case(n))
+                        && UI_CHILD_PROCESS_NAMES
+                            .iter()
+                            .any(|n| child.name.eq_ignore_ascii_case(n))
                     {
                         results.push(RunningMeetingApp {
                             pid: child.pid as i32,
@@ -1690,8 +1938,13 @@ pub fn find_running_meeting_apps(
     let window_titles = windows_enumerate_window_titles();
 
     let browser_process_names: &[&str] = &[
-        "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe",
-        "arc.exe", "opera.exe", "vivaldi.exe",
+        "chrome.exe",
+        "msedge.exe",
+        "firefox.exe",
+        "brave.exe",
+        "arc.exe",
+        "opera.exe",
+        "vivaldi.exe",
     ];
 
     for (idx, profile) in profiles.iter().enumerate() {
@@ -1705,20 +1958,24 @@ pub fn find_running_meeting_apps(
             }
 
             // Check if this is a browser process
-            let proc_name = process_map.iter()
+            let proc_name = process_map
+                .iter()
                 .find(|p| p.pid == *pid as u32)
                 .map(|p| p.name.to_lowercase());
-            let is_browser = proc_name.as_ref().map_or(false, |n| {
-                browser_process_names.iter().any(|b| n == *b)
-            });
+            let is_browser = proc_name
+                .as_ref()
+                .map_or(false, |n| browser_process_names.iter().any(|b| n == *b));
             if !is_browser {
                 continue;
             }
 
             let title_lower = title.to_lowercase();
-            if profile.app_identifiers.browser_url_patterns.iter().any(|p| {
-                title_lower.contains(&p.to_lowercase())
-            }) {
+            if profile
+                .app_identifiers
+                .browser_url_patterns
+                .iter()
+                .any(|p| title_lower.contains(&p.to_lowercase()))
+            {
                 results.push(RunningMeetingApp {
                     pid: *pid,
                     app_name: proc_name.unwrap_or_default(),
@@ -1776,19 +2033,22 @@ async fn db_find_browser_meetings(
     let rows: Vec<(String, String)> = sqlx::query_as(
         "SELECT DISTINCT app_name, window_name FROM frames \
          WHERE timestamp > datetime('now', '-30 seconds') \
-         AND app_name IS NOT NULL AND window_name IS NOT NULL"
+         AND app_name IS NOT NULL AND window_name IS NOT NULL",
     )
     .fetch_all(&db.pool)
     .await?;
 
     for (app_name, window_name) in &rows {
         let window_lower = window_name.to_lowercase();
-        let app_lower = app_name.to_lowercase();
+        let _app_lower = app_name.to_lowercase();
         for (idx, profile) in profiles.iter().enumerate() {
             if profile.app_identifiers.browser_url_patterns.is_empty() {
                 continue;
             }
-            let matches = profile.app_identifiers.browser_url_patterns.iter()
+            let matches = profile
+                .app_identifiers
+                .browser_url_patterns
+                .iter()
                 .any(|p| window_lower.contains(&p.to_lowercase()));
             if matches {
                 #[cfg(target_os = "macos")]
@@ -1808,7 +2068,10 @@ async fn db_find_browser_meetings(
                 #[cfg(not(target_os = "macos"))]
                 let pid = -1i32;
                 if pid > 0 {
-                    debug!("meeting v2: DB hint — {} window {:?} matches profile {}", app_name, window_name, idx);
+                    debug!(
+                        "meeting v2: DB hint — {} window {:?} matches profile {}",
+                        app_name, window_name, idx
+                    );
                     results.push(RunningMeetingApp {
                         pid,
                         app_name: app_name.clone(),
@@ -1867,8 +2130,8 @@ pub async fn run_meeting_detection_loop(
             _ = shutdown_rx.recv() => {
                 info!("meeting v2: shutdown received, exiting detection loop");
                 // If we're in an active meeting, end it cleanly
-                if let MeetingState::Active { meeting_id, .. }
-                    | MeetingState::Ending { meeting_id, .. } = &state
+                if let MeetingState::Active(ActiveState { meeting_id, .. })
+                    | MeetingState::Ending(EndingState { meeting_id, .. }) = &state
                 {
                     if *meeting_id >= 0 {
                         let now = Utc::now()
@@ -1914,8 +2177,9 @@ pub async fn run_meeting_detection_loop(
 
         // 1. Find running meeting app processes (blocking AX calls for native apps)
         let profiles_clone = profiles.clone();
+        let tracking_for_spawn = tracking.clone();
         let mut running_apps = tokio::task::spawn_blocking(move || {
-            find_running_meeting_apps(&profiles_clone, tracking.as_ref())
+            find_running_meeting_apps(&profiles_clone, tracking_for_spawn.as_ref())
         })
         .await
         .unwrap_or_else(|e| {
@@ -1925,7 +2189,10 @@ pub async fn run_meeting_detection_loop(
 
         // Merge DB browser hints (avoids missing meetings when AX doesn't expose URLs)
         for hint in db_browser_hints {
-            if !running_apps.iter().any(|a| a.profile_index == hint.profile_index) {
+            if !running_apps
+                .iter()
+                .any(|a| a.profile_index == hint.profile_index)
+            {
                 running_apps.push(hint);
             }
         }
@@ -1934,24 +2201,31 @@ pub async fn run_meeting_detection_loop(
             debug!(
                 "meeting v2: found {} running meeting app(s): {:?}",
                 running_apps.len(),
-                running_apps.iter().map(|a| format!("{}(pid={})", a.app_name, a.pid)).collect::<Vec<_>>()
+                running_apps
+                    .iter()
+                    .map(|a| format!("{}(pid={})", a.app_name, a.pid))
+                    .collect::<Vec<_>>()
             );
         }
 
-        if running_apps.is_empty() {
-            // No meeting apps running — handle fast path for process exit
+        let tracked_app_vanished = if let Some(t) = tracking.as_ref() {
+            !running_apps.iter().any(|a| a.pid == t.pid)
+        } else {
+            running_apps.is_empty()
+        };
+
+        if tracked_app_vanished {
+            // Tracked meeting app vanished — handle fast path for process exit
             let (new_state, ended_id) = handle_no_apps_running(state);
             state = new_state;
             if let Some(meeting_id) = ended_id {
-                let now = Utc::now()
-                    .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                    .to_string();
+                let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
                 if let Err(e) = db.end_meeting(meeting_id, &now).await {
                     error!("meeting v2: failed to end meeting {}: {}", meeting_id, e);
                 }
             }
             sync_meeting_flag(
-                matches!(state, MeetingState::Active { .. }),
+                matches!(state, MeetingState::Active(ActiveState { .. })),
                 &in_meeting_flag,
                 &detector,
             );
@@ -1983,6 +2257,7 @@ pub async fn run_meeting_detection_loop(
             for app in &apps_for_scan {
                 let mut result =
                     scanner_clone.scan_process(app.pid, &profiles_for_scan[app.profile_index]);
+                result.pid = app.pid;
                 result.profile_index = app.profile_index;
                 result.app_name = app.app_name.clone();
                 results.push(result);
@@ -2002,14 +2277,14 @@ pub async fn run_meeting_detection_loop(
         );
 
         // 3. Advance state machine
-        let (new_state, action) = advance_state(state, &scan_results);
+        let (new_state, action) = advance_state(state, &scan_results, &profiles);
         state = new_state;
 
         // Adaptive interval based on state
         idle_scan_count = 0; // reset idle counter when apps are present
         current_interval = match &state {
             MeetingState::Idle => IDLE_APPS_SCAN_INTERVAL, // apps open but no call
-            _ => base_interval, // Confirming/Active/Ending — scan fast
+            _ => base_interval,                            // Confirming/Active/Ending — scan fast
         };
 
         // 4. Handle actions
@@ -2027,37 +2302,37 @@ pub async fn run_meeting_detection_loop(
                                 recent.id
                             }
                             Err(e) => {
-                                warn!(
-                                    "meeting v2: failed to reopen meeting {}: {}",
-                                    recent.id, e
-                                );
+                                warn!("meeting v2: failed to reopen meeting {}: {}", recent.id, e);
                                 insert_new_meeting(&db, &app).await
                             }
                         },
                         Ok(None) => insert_new_meeting(&db, &app).await,
                         Err(e) => {
-                            warn!(
-                                "meeting v2: failed to find recent meeting: {}",
-                                e
-                            );
+                            warn!("meeting v2: failed to find recent meeting: {}", e);
                             insert_new_meeting(&db, &app).await
                         }
                     };
 
-                    // Update state with actual meeting ID (replace the placeholder -1)
-                    if let MeetingState::Active {
+                    // Update state with actual meeting ID (replace the placeholder -1).
+                    // Preserve had_controls_last_scan — controls were confirmed present.
+                    if let MeetingState::Active(ActiveState {
                         app: ref a,
                         started_at,
                         last_seen,
+                        profile_index,
+                        pid,
                         ..
-                    } = state
+                    }) = state
                     {
-                        state = MeetingState::Active {
+                        state = MeetingState::Active(ActiveState {
                             meeting_id,
                             app: a.clone(),
                             started_at,
                             last_seen,
-                        };
+                            had_controls_last_scan: true,
+                            profile_index,
+                            pid,
+                        });
                     }
 
                     // Calendar enrichment removed — the old MeetingDetector
@@ -2066,18 +2341,13 @@ pub async fn run_meeting_detection_loop(
                 }
                 StateAction::EndMeeting { meeting_id } => {
                     if meeting_id >= 0 {
-                        let now = Utc::now()
-                            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
-                            .to_string();
+                        let now = Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
                         match db.end_meeting(meeting_id, &now).await {
                             Ok(()) => {
                                 info!("meeting v2: meeting ended (id={})", meeting_id);
                             }
                             Err(e) => {
-                                error!(
-                                    "meeting v2: failed to end meeting {}: {}",
-                                    meeting_id, e
-                                );
+                                error!("meeting v2: failed to end meeting {}: {}", meeting_id, e);
                             }
                         }
                     }
@@ -2086,7 +2356,7 @@ pub async fn run_meeting_detection_loop(
         }
 
         // 5. Sync the in_meeting flag
-        let currently_in_meeting = matches!(state, MeetingState::Active { .. });
+        let currently_in_meeting = matches!(state, MeetingState::Active(ActiveState { .. }));
         sync_meeting_flag(currently_in_meeting, &in_meeting_flag, &detector);
     }
 }
@@ -2100,75 +2370,72 @@ fn get_active_tracking(
     state: &MeetingState,
     _profiles: &[MeetingDetectionProfile],
 ) -> Option<ActiveTracking> {
-    // We don't store PID in state, so we can't provide tracking info from state alone.
-    // This is intentional — on the first scan after state change, we rediscover via
-    // find_running_meeting_apps. On subsequent scans, the app will be found by name
-    // or URL. For browser meetings where the tab title changes, the Ending timeout
-    // (30s) provides enough buffer. A more robust approach would be to store the PID
-    // in MeetingState, but that's a larger refactor.
-    //
-    // TODO: Store PID in MeetingState for robust browser tab-switch handling.
-    let _ = state;
-    None
+    match state {
+        MeetingState::Confirming(ConfirmingState {
+            pid, profile_index, ..
+        })
+        | MeetingState::Active(ActiveState {
+            pid, profile_index, ..
+        })
+        | MeetingState::Ending(EndingState {
+            pid, profile_index, ..
+        }) => Some(ActiveTracking {
+            pid: *pid,
+            profile_index: *profile_index,
+        }),
+        MeetingState::Idle => None,
+    }
 }
 
 /// Handle the case where no meeting apps are running.
 ///
 /// Returns the new state and optionally a meeting ID that should be ended in the DB.
+///
+/// When the meeting app process exits while in Active state, we end immediately
+/// (instant_end=true) because the user has definitely left.
 fn handle_no_apps_running(state: MeetingState) -> (MeetingState, Option<i64>) {
     match state {
-        MeetingState::Active {
+        MeetingState::Active(ActiveState {
             meeting_id,
             app,
-            started_at,
+            started_at: _,
             ..
-        } => {
+        }) => {
+            // Process exited - end immediately, no grace period
+            // This is a clean exit because the entire process is gone
             info!(
-                "meeting v2: Active -> Ending (app process exited, app={})",
-                app
+                "meeting v2: Active -> Idle (process exited, app={}, id={})",
+                app, meeting_id
             );
-            (
-                MeetingState::Ending {
-                    meeting_id,
-                    app,
-                    started_at,
-                    since: Instant::now(),
-                },
-                None,
-            )
+            let ended_id = if meeting_id >= 0 {
+                Some(meeting_id)
+            } else {
+                None
+            };
+            (MeetingState::Idle, ended_id)
         }
-        MeetingState::Confirming { app, .. } => {
+        MeetingState::Confirming(ConfirmingState { app, .. }) => {
             info!(
                 "meeting v2: Confirming -> Idle (app process exited, app={})",
                 app
             );
             (MeetingState::Idle, None)
         }
-        MeetingState::Ending {
-            meeting_id,
-            since,
-            app,
-            started_at,
-        } => {
-            if since.elapsed() >= ENDING_TIMEOUT {
-                info!("meeting v2: Ending -> Idle (timeout, app={})", app);
-                let ended_id = if meeting_id >= 0 {
-                    Some(meeting_id)
-                } else {
-                    None
-                };
-                (MeetingState::Idle, ended_id)
+        MeetingState::Ending(EndingState {
+            meeting_id, app, ..
+        }) => {
+            // Process is completely gone — end immediately regardless of instant_end flag.
+            // There is no app left to flicker back, so the grace period serves no purpose.
+            info!(
+                "meeting v2: Ending -> Idle (process exited, app={}, id={})",
+                app, meeting_id
+            );
+            let ended_id = if meeting_id >= 0 {
+                Some(meeting_id)
             } else {
-                (
-                    MeetingState::Ending {
-                        meeting_id,
-                        since,
-                        app,
-                        started_at,
-                    },
-                    None,
-                )
-            }
+                None
+            };
+            (MeetingState::Idle, ended_id)
         }
         MeetingState::Idle => (MeetingState::Idle, None),
     }
@@ -2225,7 +2492,53 @@ mod tests {
                 "profile {} requires 0 signals",
                 i
             );
+            // leave_signals field must exist (can be empty for apps like FaceTime/Discord native)
+            // Major profiles (Teams, Zoom, Meet, Slack) must have at least one leave signal
+            // so that faster meeting end detection (#2548) can fire for them.
+            let _leave_signals_len = p.leave_signals.len(); // field must be accessible
         }
+    }
+
+    #[test]
+    fn test_profiles_have_leave_signals() {
+        // Issue #2548: Verify that major profiles have leave signals defined
+        let profiles = load_detection_profiles();
+
+        // Find Teams profile
+        let teams = profiles.iter().find(|p| {
+            p.app_identifiers
+                .macos_app_names
+                .contains(&"microsoft teams")
+        });
+        assert!(teams.is_some(), "Teams profile not found");
+        assert!(
+            !teams.unwrap().leave_signals.is_empty(),
+            "Teams profile should have leave signals"
+        );
+
+        // Find Zoom profile
+        let zoom = profiles
+            .iter()
+            .find(|p| p.app_identifiers.macos_app_names.contains(&"zoom.us"));
+        assert!(zoom.is_some(), "Zoom profile not found");
+        assert!(
+            !zoom.unwrap().leave_signals.is_empty(),
+            "Zoom profile should have leave signals"
+        );
+
+        // Find Google Meet profile
+        let meet = profiles.iter().find(|p| {
+            !p.app_identifiers.browser_url_patterns.is_empty()
+                && p.app_identifiers
+                    .browser_url_patterns
+                    .iter()
+                    .any(|u| u.contains("meet.google.com"))
+        });
+        assert!(meet.is_some(), "Google Meet profile not found");
+        assert!(
+            !meet.unwrap().leave_signals.is_empty(),
+            "Google Meet profile should have leave signals"
+        );
     }
 
     #[test]
@@ -2249,9 +2562,7 @@ mod tests {
                 CallSignal::RoleWithName { name_contains, .. } => {
                     !name_contains.to_lowercase().contains("mute")
                 }
-                CallSignal::AutomationIdContains(s) => {
-                    !s.to_lowercase().contains("mute")
-                }
+                CallSignal::AutomationIdContains(s) => !s.to_lowercase().contains("mute"),
                 _ => true,
             });
             assert!(
@@ -2388,9 +2699,7 @@ mod tests {
             let mute_matches: Vec<_> = profile
                 .call_signals
                 .iter()
-                .filter(|s| {
-                    check_signal_match(s, "AXButton", Some("Mute"), None, None)
-                })
+                .filter(|s| check_signal_match(s, "AXButton", Some("Mute"), None, None))
                 .collect();
             // If mute is a signal, verify that other non-mute signals also exist
             // (so a lobby with only Mute won't trigger detection)
@@ -2407,12 +2716,42 @@ mod tests {
 
     fn make_scan_result(app: &str, in_call: bool, signals: usize) -> ScanResult {
         ScanResult {
+            pid: 1234,
             app_name: app.to_string(),
             profile_index: 0,
             signals_found: signals,
             is_in_call: in_call,
             matched_signals: if in_call {
                 vec!["test-signal".to_string()]
+            } else {
+                vec![]
+            },
+            leave_signal_detected: false,
+            matched_leave_signals: vec![],
+        }
+    }
+
+    /// Helper to create scan result with leave signal detection
+    fn make_scan_result_with_leave(
+        app: &str,
+        in_call: bool,
+        signals: usize,
+        leave_detected: bool,
+    ) -> ScanResult {
+        ScanResult {
+            pid: 1234,
+            app_name: app.to_string(),
+            profile_index: 0,
+            signals_found: signals,
+            is_in_call: in_call,
+            matched_signals: if in_call {
+                vec!["test-signal".to_string()]
+            } else {
+                vec![]
+            },
+            leave_signal_detected: leave_detected,
+            matched_leave_signals: if leave_detected {
+                vec!["you left".to_string()]
             } else {
                 vec![]
             },
@@ -2423,9 +2762,16 @@ mod tests {
     fn test_idle_to_confirming() {
         let state = MeetingState::Idle;
         let results = vec![make_scan_result("Zoom", true, 1)];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
-        assert!(matches!(new_state, MeetingState::Confirming { .. }));
+        assert!(matches!(
+            new_state,
+            MeetingState::Confirming(ConfirmingState {
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
         assert!(action.is_none());
     }
 
@@ -2433,7 +2779,7 @@ mod tests {
     fn test_idle_stays_idle_no_results() {
         let state = MeetingState::Idle;
         let results: Vec<ScanResult> = vec![];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(new_state, MeetingState::Idle));
         assert!(action.is_none());
@@ -2443,7 +2789,7 @@ mod tests {
     fn test_idle_stays_idle_no_call() {
         let state = MeetingState::Idle;
         let results = vec![make_scan_result("Zoom", false, 0)];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(new_state, MeetingState::Idle));
         assert!(action.is_none());
@@ -2451,27 +2797,36 @@ mod tests {
 
     #[test]
     fn test_confirming_to_active() {
-        let state = MeetingState::Confirming {
+        let state = MeetingState::Confirming(ConfirmingState {
             since: Instant::now(),
             app: "Zoom".to_string(),
             profile_index: 0,
-        };
+            pid: 1234,
+        });
         let results = vec![make_scan_result("Zoom", true, 2)];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
-        assert!(matches!(new_state, MeetingState::Active { .. }));
+        assert!(matches!(
+            new_state,
+            MeetingState::Active(ActiveState {
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
         assert!(matches!(action, Some(StateAction::StartMeeting { .. })));
     }
 
     #[test]
     fn test_confirming_to_idle_timeout() {
-        let state = MeetingState::Confirming {
+        let state = MeetingState::Confirming(ConfirmingState {
             since: Instant::now() - CONFIRM_TIMEOUT - Duration::from_secs(1),
             app: "Zoom".to_string(),
             profile_index: 0,
-        };
+            pid: 1234,
+        });
         let results: Vec<ScanResult> = vec![];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(new_state, MeetingState::Idle));
         assert!(action.is_none());
@@ -2480,56 +2835,74 @@ mod tests {
     #[test]
     fn test_confirming_stays_confirming() {
         let since = Instant::now();
-        let state = MeetingState::Confirming {
+        let state = MeetingState::Confirming(ConfirmingState {
             since,
             app: "Zoom".to_string(),
             profile_index: 0,
-        };
+            pid: 0,
+        });
         let results: Vec<ScanResult> = vec![];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
-        assert!(matches!(new_state, MeetingState::Confirming { .. }));
+        assert!(matches!(
+            new_state,
+            MeetingState::Confirming(ConfirmingState {
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
         assert!(action.is_none());
     }
 
     #[test]
     fn test_active_stays_active() {
-        let state = MeetingState::Active {
+        let state = MeetingState::Active(ActiveState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             last_seen: Instant::now(),
-        };
+            had_controls_last_scan: true,
+            pid: 0,
+            profile_index: 0,
+        });
         let results = vec![make_scan_result("Zoom", true, 1)];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(
             new_state,
-            MeetingState::Active {
+            MeetingState::Active(ActiveState {
                 meeting_id: 42,
+                pid: 0,
+                profile_index: 0,
                 ..
-            }
+            })
         ));
         assert!(action.is_none());
     }
 
     #[test]
     fn test_active_to_ending() {
-        let state = MeetingState::Active {
+        let state = MeetingState::Active(ActiveState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             last_seen: Instant::now(),
-        };
+            had_controls_last_scan: true,
+            pid: 0,
+            profile_index: 0,
+        });
         let results: Vec<ScanResult> = vec![];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(
             new_state,
-            MeetingState::Ending {
+            MeetingState::Ending(EndingState {
                 meeting_id: 42,
+                pid: 0,
+                profile_index: 0,
                 ..
-            }
+            })
         ));
         assert!(action.is_none());
     }
@@ -2537,21 +2910,24 @@ mod tests {
     #[test]
     fn test_ending_preserves_started_at() {
         let original_start = Utc::now() - chrono::Duration::minutes(30);
-        let state = MeetingState::Active {
+        let state = MeetingState::Active(ActiveState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: original_start,
             last_seen: Instant::now(),
-        };
+            had_controls_last_scan: true,
+            pid: 0,
+            profile_index: 0,
+        });
         // Transition to Ending
         let results: Vec<ScanResult> = vec![];
-        let (ending_state, _) = advance_state(state, &results);
+        let (ending_state, _) = advance_state(state, &results, &[]);
 
         // Transition back to Active (controls reappear)
         let results = vec![make_scan_result("Zoom", true, 1)];
-        let (active_again, _) = advance_state(ending_state, &results);
+        let (active_again, _) = advance_state(ending_state, &results, &[]);
 
-        if let MeetingState::Active { started_at, .. } = active_again {
+        if let MeetingState::Active(ActiveState { started_at, .. }) = active_again {
             assert_eq!(
                 started_at, original_start,
                 "started_at should be preserved through Ending -> Active"
@@ -2564,35 +2940,38 @@ mod tests {
     #[test]
     fn test_ending_to_active_controls_reappear() {
         let started = Utc::now();
-        let state = MeetingState::Ending {
+        let state = MeetingState::Ending(EndingState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: started,
             since: Instant::now(),
-        };
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
         let results = vec![make_scan_result("Zoom", true, 1)];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(
             new_state,
-            MeetingState::Active {
-                meeting_id: 42,
-                ..
-            }
+            MeetingState::Active(ActiveState { meeting_id: 42, .. })
         ));
         assert!(action.is_none());
     }
 
     #[test]
     fn test_ending_to_idle_timeout() {
-        let state = MeetingState::Ending {
+        let state = MeetingState::Ending(EndingState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             since: Instant::now() - ENDING_TIMEOUT - Duration::from_secs(1),
-        };
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
         let results: Vec<ScanResult> = vec![];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(new_state, MeetingState::Idle));
         assert!(matches!(
@@ -2604,21 +2983,21 @@ mod tests {
     #[test]
     fn test_ending_stays_ending() {
         let since = Instant::now();
-        let state = MeetingState::Ending {
+        let state = MeetingState::Ending(EndingState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             since,
-        };
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
         let results: Vec<ScanResult> = vec![];
-        let (new_state, action) = advance_state(state, &results);
+        let (new_state, action) = advance_state(state, &results, &[]);
 
         assert!(matches!(
             new_state,
-            MeetingState::Ending {
-                meeting_id: 42,
-                ..
-            }
+            MeetingState::Ending(EndingState { meeting_id: 42, .. })
         ));
         assert!(action.is_none());
     }
@@ -2628,26 +3007,32 @@ mod tests {
     #[test]
     fn test_app_crash_during_active() {
         // Simulate: Active meeting, then process disappears (no scan results)
-        let state = MeetingState::Active {
+        let state = MeetingState::Active(ActiveState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             last_seen: Instant::now(),
-        };
+            had_controls_last_scan: true,
+            pid: 0,
+            profile_index: 0,
+        });
 
         // First: Active -> Ending (no controls found)
-        let (state, action) = advance_state(state, &[]);
-        assert!(matches!(state, MeetingState::Ending { .. }));
+        let (state, action) = advance_state(state, &[], &[]);
+        assert!(matches!(state, MeetingState::Ending(EndingState { .. })));
         assert!(action.is_none());
 
         // Simulate timeout
-        let state = MeetingState::Ending {
+        let state = MeetingState::Ending(EndingState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             since: Instant::now() - ENDING_TIMEOUT - Duration::from_secs(1),
-        };
-        let (state, action) = advance_state(state, &[]);
+            instant_end: true,
+            profile_index: 0,
+            pid: 0,
+        });
+        let (state, action) = advance_state(state, &[], &[]);
         assert!(matches!(state, MeetingState::Idle));
         assert!(matches!(
             action,
@@ -2663,19 +3048,40 @@ mod tests {
         // Scan 1: Teams detected
         let state = MeetingState::Idle;
         let results = vec![make_scan_result("Teams", true, 1)];
-        let (state, _) = advance_state(state, &results);
-        assert!(matches!(state, MeetingState::Confirming { .. }));
+        let (state, _) = advance_state(state, &results, &[]);
+        assert!(matches!(
+            state,
+            MeetingState::Confirming(ConfirmingState {
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
 
         // Scan 2: No controls (switched to VS Code, Teams AX tree inaccessible)
-        let (state, _) = advance_state(state, &[]);
+        let (state, _) = advance_state(state, &[], &[]);
         // Still confirming (within timeout)
-        assert!(matches!(state, MeetingState::Confirming { .. }));
+        assert!(matches!(
+            state,
+            MeetingState::Confirming(ConfirmingState {
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
 
         // Scan 3: Teams detected again
         let results = vec![make_scan_result("Teams", true, 1)];
-        let (state, action) = advance_state(state, &results);
+        let (state, action) = advance_state(state, &results, &[]);
         // Should transition to Active
-        assert!(matches!(state, MeetingState::Active { .. }));
+        assert!(matches!(
+            state,
+            MeetingState::Active(ActiveState {
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
         assert!(matches!(action, Some(StateAction::StartMeeting { .. })));
     }
 
@@ -2685,30 +3091,35 @@ mod tests {
         // Should stay Idle.
         let state = MeetingState::Idle;
         let results = vec![make_scan_result("Teams", false, 0)];
-        let (state, _) = advance_state(state, &results);
+        let (state, _) = advance_state(state, &results, &[]);
         assert!(matches!(state, MeetingState::Idle));
     }
 
     #[test]
-    fn test_handle_no_apps_active_to_ending() {
-        let state = MeetingState::Active {
+    fn test_no_apps_running_ends_immediately_from_active_state() {
+        let state = MeetingState::Active(ActiveState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             last_seen: Instant::now(),
-        };
+            had_controls_last_scan: true,
+            pid: 0,
+            profile_index: 0,
+        });
+        // With the new implementation, process exit should now end immediately
         let (new_state, ended_id) = handle_no_apps_running(state);
-        assert!(matches!(new_state, MeetingState::Ending { .. }));
-        assert!(ended_id.is_none()); // not ended yet, just transitioning
+        assert!(matches!(new_state, MeetingState::Idle));
+        assert_eq!(ended_id, Some(42)); // ends immediately on process exit
     }
 
     #[test]
     fn test_handle_no_apps_confirming_to_idle() {
-        let state = MeetingState::Confirming {
+        let state = MeetingState::Confirming(ConfirmingState {
             since: Instant::now(),
             app: "Zoom".to_string(),
             profile_index: 0,
-        };
+            pid: result.pid,
+        });
         let (new_state, ended_id) = handle_no_apps_running(state);
         assert!(matches!(new_state, MeetingState::Idle));
         assert!(ended_id.is_none());
@@ -2716,39 +3127,52 @@ mod tests {
 
     #[test]
     fn test_handle_no_apps_ending_timeout() {
-        let state = MeetingState::Ending {
+        // Bug 2 fix: process exit from Ending state should now end immediately,
+        // regardless of how much time has elapsed or the instant_end flag.
+        let state = MeetingState::Ending(EndingState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
-            since: Instant::now() - ENDING_TIMEOUT - Duration::from_secs(1),
-        };
+            // Even if barely any time has elapsed...
+            since: Instant::now(),
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
+        // ...process exit always triggers an immediate end.
         let (new_state, ended_id) = handle_no_apps_running(state);
         assert!(matches!(new_state, MeetingState::Idle));
         assert_eq!(ended_id, Some(42));
     }
 
     #[test]
-    fn test_handle_no_apps_ending_not_yet() {
-        let state = MeetingState::Ending {
+    fn test_handle_no_apps_ending_to_idle_on_process_exit() {
+        let state = MeetingState::Ending(EndingState {
             meeting_id: 42,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             since: Instant::now(),
-        };
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
         let (new_state, ended_id) = handle_no_apps_running(state);
-        assert!(matches!(new_state, MeetingState::Ending { .. }));
-        assert!(ended_id.is_none());
+        assert!(matches!(new_state, MeetingState::Idle));
+        assert_eq!(ended_id, Some(42));
     }
 
     #[test]
     fn test_handle_no_apps_invalid_meeting_id() {
         // DB insert failed, meeting_id = -1. Should not call end_meeting.
-        let state = MeetingState::Ending {
+        let state = MeetingState::Ending(EndingState {
             meeting_id: -1,
             app: "Zoom".to_string(),
             started_at: Utc::now(),
             since: Instant::now() - ENDING_TIMEOUT - Duration::from_secs(1),
-        };
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
         let (_, ended_id) = handle_no_apps_running(state);
         assert!(ended_id.is_none(), "should not end meeting with id=-1");
     }
@@ -2799,8 +3223,14 @@ mod tests {
             make_scan_result("Zoom", true, 3),
             make_scan_result("Chrome", false, 0),
         ];
-        let (new_state, _) = advance_state(state, &results);
-        if let MeetingState::Confirming { app, .. } = new_state {
+        let (new_state, _) = advance_state(state, &results, &[]);
+        if let MeetingState::Confirming(ConfirmingState {
+            app,
+            pid: 0,
+            profile_index: 0,
+            ..
+        }) = new_state
+        {
             assert_eq!(app, "Zoom", "should pick the result with most signals");
         } else {
             panic!("expected Confirming state");
@@ -2897,7 +3327,10 @@ mod tests {
             .expect("Zoom profile not found");
 
         let has_menu_bar = zoom.call_signals.iter().any(|s| {
-            matches!(s, CallSignal::MenuBarItem { .. } | CallSignal::MenuItemId(_))
+            matches!(
+                s,
+                CallSignal::MenuBarItem { .. } | CallSignal::MenuItemId(_)
+            )
         });
         assert!(
             has_menu_bar,
@@ -2926,6 +3359,345 @@ mod tests {
             None
         ));
     }
+
+    // ── Fast end tests (issue #2548) ────────────────────────────────────────
+
+    #[test]
+    fn test_fast_end_on_complete_control_loss() {
+        // When controls were present in the last scan and now completely gone,
+        // the meeting should end with FAST_ENDING_TIMEOUT (5s) instead of 30s
+        let state = MeetingState::Active(ActiveState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            last_seen: Instant::now(),
+            had_controls_last_scan: true, // We had controls in the last scan
+            pid: 0,
+            profile_index: 0,
+        });
+
+        // Transition to Ending - should set instant_end=true because we had controls
+        let results: Vec<ScanResult> = vec![];
+        let (ending_state, action) = advance_state(state, &results, &[]);
+
+        assert!(matches!(
+            ending_state,
+            MeetingState::Ending(EndingState {
+                instant_end: true,
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
+        assert!(action.is_none());
+
+        // Now advance with 5s elapsed - should end immediately (fast timeout)
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            since: Instant::now() - FAST_ENDING_TIMEOUT - Duration::from_secs(1),
+            instant_end: true,
+            profile_index: 0,
+            pid: 0,
+        });
+
+        let (idle_state, end_action) = advance_state(state, &[], &[]);
+        assert!(matches!(idle_state, MeetingState::Idle));
+        assert!(matches!(
+            end_action,
+            Some(StateAction::EndMeeting { meeting_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn test_slow_end_on_intermittent_flicker() {
+        // When controls were already missing (intermittent flicker), keep the full 30s timeout
+        let state = MeetingState::Active(ActiveState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            last_seen: Instant::now(),
+            had_controls_last_scan: false, // Controls were already missing
+            pid: 0,
+            profile_index: 0,
+        });
+
+        // Transition to Ending - should set instant_end=false
+        let results: Vec<ScanResult> = vec![];
+        let (ending_state, action) = advance_state(state, &results, &[]);
+
+        assert!(matches!(
+            ending_state,
+            MeetingState::Ending(EndingState {
+                instant_end: false,
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_ending_to_idle_on_leave_signal() {
+        // When leave signal is detected during Ending state, end immediately
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Teams".to_string(),
+            started_at: Utc::now(),
+            since: Instant::now(), // Just started, no timeout
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
+
+        // Scan result with leave signal detected
+        let results = vec![make_scan_result_with_leave("Teams", false, 0, true)];
+        let (new_state, action) = advance_state(state, &results, &[]);
+
+        // Should end immediately when leave signal is detected
+        assert!(matches!(new_state, MeetingState::Idle));
+        assert!(matches!(
+            action,
+            Some(StateAction::EndMeeting { meeting_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn test_instant_end_on_process_exit() {
+        // When process exits while in Active state, end immediately
+        let state = MeetingState::Active(ActiveState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            last_seen: Instant::now(),
+            had_controls_last_scan: true,
+            pid: 0,
+            profile_index: 0,
+        });
+
+        // handle_no_apps_running should end immediately on process exit
+        let (new_state, ended_id) = handle_no_apps_running(state);
+
+        assert!(matches!(new_state, MeetingState::Idle));
+        assert_eq!(ended_id, Some(42));
+    }
+
+    #[test]
+    fn test_fast_end_ending_with_instant_end_flag() {
+        // Ending state with instant_end=true should use fast timeout
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            since: Instant::now() - FAST_ENDING_TIMEOUT - Duration::from_secs(1),
+            instant_end: true,
+            profile_index: 0,
+            pid: 0,
+        });
+
+        let results: Vec<ScanResult> = vec![];
+        let (new_state, action) = advance_state(state, &results, &[]);
+
+        assert!(matches!(new_state, MeetingState::Idle));
+        assert!(matches!(
+            action,
+            Some(StateAction::EndMeeting { meeting_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn test_slow_end_ending_without_instant_end_flag() {
+        // Ending state with instant_end=false should use full timeout
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            // Only 5 seconds elapsed (less than FAST_ENDING_TIMEOUT)
+            since: Instant::now() - FAST_ENDING_TIMEOUT,
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
+
+        let results: Vec<ScanResult> = vec![];
+        let (new_state, action) = advance_state(state, &results, &[]);
+
+        // Should NOT end yet - only 5s elapsed, full ENDING_TIMEOUT still applies
+        assert!(matches!(
+            new_state,
+            MeetingState::Ending(EndingState {
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn test_fast_end_preserves_instant_end_across_ticks() {
+        // Regression test for Bug 1: instant_end flag must be preserved across
+        // multiple advance_state calls while waiting for the timeout.
+        let since = Instant::now() - Duration::from_secs(2); // 2s elapsed, timeout not yet
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            since,
+            instant_end: true, // fast path set
+            pid: 0,
+            profile_index: 0,
+        });
+
+        // First tick — not yet timed out (2s < FAST_ENDING_TIMEOUT = 5s)
+        let (state, action) = advance_state(state, &[], &[]);
+        assert!(action.is_none(), "should still be waiting");
+
+        // The instant_end flag MUST be preserved on re-entry into Ending state
+        match &state {
+            MeetingState::Ending(EndingState {
+                instant_end,
+                pid: 0,
+                profile_index: 0,
+                ..
+            }) => {
+                assert!(*instant_end, "instant_end must survive across Ending ticks");
+            }
+            _ => panic!("expected Ending state, got {:?}", state),
+        }
+
+        // Second tick — simulate timeout elapsed
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Zoom".to_string(),
+            started_at: Utc::now(),
+            since: Instant::now() - FAST_ENDING_TIMEOUT - Duration::from_secs(1),
+            instant_end: true,
+            profile_index: 0,
+            pid: 0,
+        });
+        let (new_state, action) = advance_state(state, &[], &[]);
+        assert!(matches!(new_state, MeetingState::Idle));
+        assert!(matches!(
+            action,
+            Some(StateAction::EndMeeting { meeting_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn test_leave_signal_during_tab_switch() {
+        // When controls reappear (tab switch recovery) AND a leave signal is present,
+        // active controls take precedence and the meeting continues.
+        // Leave signals are only acted upon when there are NO active call controls.
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Teams".to_string(),
+            started_at: Utc::now(),
+            since: Instant::now(),
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
+
+        // Controls reappeared (maybe user switched back to the meeting tab)
+        // AND a leave signal is incidentally visible
+        let results = vec![ScanResult {
+            pid: 1234,
+            app_name: "Teams".to_string(),
+            profile_index: 0,
+            signals_found: 1,
+            is_in_call: true, // call controls present → meeting still active
+            matched_signals: vec!["hangup-button".to_string()],
+            leave_signal_detected: true, // leave text also visible (benign)
+            matched_leave_signals: vec!["you left".to_string()],
+        }];
+
+        let (new_state, action) = advance_state(state, &results, &[]);
+
+        // Controls win over leave signal — meeting goes back to Active
+        assert!(
+            matches!(
+                new_state,
+                MeetingState::Active(ActiveState {
+                    meeting_id: 42,
+                    pid: 0,
+                    profile_index: 0,
+                    ..
+                })
+            ),
+            "controls reappearing should restore Active, not end the meeting"
+        );
+        assert!(action.is_none());
+    }
+    #[test]
+    fn test_leave_signal_detection() {
+        let mut profile = MeetingDetectionProfile {
+            app_identifiers: AppIdentifiers {
+                macos_app_names: &["zoom.us"],
+                windows_process_names: &["zoom.exe"],
+                browser_url_patterns: &[],
+            },
+            call_signals: vec![CallSignal::AutomationId("leave")],
+            min_signals_required: 1,
+            leave_signals: vec![CallSignal::NameContains("you left")],
+        };
+        let result = make_scan_result_with_leave("zoom.us", false, 0, true);
+        assert!(result.leave_signal_detected);
+        assert!(!result.is_in_call);
+        let result2 = make_scan_result_with_leave("zoom.us", true, 1, false);
+        assert!(!result2.leave_signal_detected);
+        assert!(result2.is_in_call);
+    }
+
+    #[test]
+    fn test_multiple_leave_signals() {
+        let state = MeetingState::Ending(EndingState {
+            meeting_id: 42,
+            app: "Teams".to_string(),
+            started_at: Utc::now(),
+            since: Instant::now(),
+            instant_end: false,
+            profile_index: 0,
+            pid: 0,
+        });
+        let results = vec![
+            make_scan_result_with_leave("Zoom", false, 0, true),
+            make_scan_result_with_leave("Teams", false, 0, true),
+        ];
+        let (new_state, action) = advance_state(state, &results, &[]);
+        assert!(matches!(new_state, MeetingState::Idle));
+        assert!(matches!(
+            action,
+            Some(StateAction::EndMeeting { meeting_id: 42 })
+        ));
+    }
+
+    #[test]
+    fn test_fast_end_with_multiple_apps_running() {
+        let state = MeetingState::Active(ActiveState {
+            meeting_id: 42,
+            app: "Teams".to_string(),
+            started_at: Utc::now(),
+            last_seen: Instant::now(),
+            had_controls_last_scan: true,
+            pid: 0,
+            profile_index: 0,
+        });
+        let results = vec![make_scan_result("Slack", false, 0)];
+        let (state, action) = advance_state(state, &results, &[]);
+        assert!(action.is_none());
+        assert!(matches!(
+            state,
+            MeetingState::Ending(EndingState {
+                instant_end: true,
+                pid: 0,
+                profile_index: 0,
+                ..
+            })
+        ));
+    }
 }
 
 #[cfg(test)]
@@ -2945,7 +3717,10 @@ mod live_tests {
         let apps = find_running_meeting_apps(&profiles, None);
         println!("Found {} running meeting app(s)", apps.len());
         for app in &apps {
-            println!("  {} (pid={}, profile={})", app.app_name, app.pid, app.profile_index);
+            println!(
+                "  {} (pid={}, profile={})",
+                app.app_name, app.pid, app.profile_index
+            );
         }
 
         if apps.is_empty() {
@@ -2956,7 +3731,10 @@ mod live_tests {
                 let running = workspace.running_apps();
                 for i in 0..running.len() {
                     let app = &running[i];
-                    let name = app.localized_name().map(|s| s.to_string()).unwrap_or_default();
+                    let name = app
+                        .localized_name()
+                        .map(|s| s.to_string())
+                        .unwrap_or_default();
                     let name_lower = name.to_lowercase();
                     if BROWSER_NAMES.iter().any(|b| name_lower.contains(b)) {
                         println!("\nBROWSER: {} (pid={})", name, app.pid());
@@ -2968,15 +3746,24 @@ mod live_tests {
                                 for j in 0..children.len() {
                                     let child = &children[j];
                                     let _ = child.set_messaging_timeout_secs(0.5);
-                                    if let Some(title) = get_ax_string_attr(child, cidre::ax::attr::title()) {
-                                        let has_meet = title.to_lowercase().contains("google meet") || title.to_lowercase().contains("meet.google.com");
+                                    if let Some(title) =
+                                        get_ax_string_attr(child, cidre::ax::attr::title())
+                                    {
+                                        let has_meet = title.to_lowercase().contains("google meet")
+                                            || title.to_lowercase().contains("meet.google.com");
                                         if has_meet {
                                             println!("  *** MEET WINDOW [{}]: {:?}", j, title);
                                         } else {
-                                            println!("  window[{}]: {:?}", j, &title[..title.len().min(80)]);
+                                            println!(
+                                                "  window[{}]: {:?}",
+                                                j,
+                                                &title[..title.len().min(80)]
+                                            );
                                         }
                                     }
-                                    if let Some(doc) = get_ax_string_attr(child, cidre::ax::attr::document()) {
+                                    if let Some(doc) =
+                                        get_ax_string_attr(child, cidre::ax::attr::document())
+                                    {
                                         if doc.to_lowercase().contains("meet.google") {
                                             println!("  *** MEET DOC [{}]: {:?}", j, doc);
                                         }
@@ -2996,8 +3783,10 @@ mod live_tests {
             let scanner = MeetingUiScanner::new();
             for app in &apps {
                 let result = scanner.scan_process(app.pid, &profiles[app.profile_index]);
-                println!("  {} => in_call={}, signals={}, matched={:?}",
-                    app.app_name, result.is_in_call, result.signals_found, result.matched_signals);
+                println!(
+                    "  {} => in_call={}, signals={}, matched={:?}",
+                    app.app_name, result.is_in_call, result.signals_found, result.matched_signals
+                );
             }
         }
     }
@@ -3017,40 +3806,62 @@ mod live_tests2 {
             let running = workspace.running_apps();
             for i in 0..running.len() {
                 let app = &running[i];
-                let name = app.localized_name().map(|s| s.to_string()).unwrap_or_default();
-                if name != "Arc" { continue; }
-                
+                let name = app
+                    .localized_name()
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                if name != "Arc" {
+                    continue;
+                }
+
                 println!("Arc pid={}", app.pid());
                 let ax_app = cidre::ax::UiElement::with_app_pid(app.pid());
                 let _ = ax_app.set_messaging_timeout_secs(2.0);
-                
+
                 let windows = ax_app.children().unwrap();
                 for j in 0..windows.len() {
                     let window = &windows[j];
                     let _ = window.set_messaging_timeout_secs(1.0);
-                    
-                    let title = get_ax_string_attr(window, cidre::ax::attr::title()).unwrap_or_default();
-                    let doc = get_ax_string_attr(window, cidre::ax::attr::document()).unwrap_or_default();
+
+                    let title =
+                        get_ax_string_attr(window, cidre::ax::attr::title()).unwrap_or_default();
+                    let doc =
+                        get_ax_string_attr(window, cidre::ax::attr::document()).unwrap_or_default();
                     println!("\nwindow[{}] title={:?} doc={:?}", j, title, doc);
-                    
+
                     // Check role
-                    let role = get_ax_string_attr(window, cidre::ax::attr::role()).unwrap_or_default();
+                    let role =
+                        get_ax_string_attr(window, cidre::ax::attr::role()).unwrap_or_default();
                     println!("  role={:?}", role);
-                    
+
                     // Walk 2 levels deep looking for URL or "Google Meet"
                     if let Ok(children) = window.children() {
                         println!("  children: {}", children.len());
                         for k in 0..children.len().min(20) {
                             let child = &children[k];
                             let _ = child.set_messaging_timeout_secs(0.3);
-                            let crole = get_ax_string_attr(child, cidre::ax::attr::role()).unwrap_or_default();
-                            let ctitle = get_ax_string_attr(child, cidre::ax::attr::title()).unwrap_or_default();
-                            let cdoc = get_ax_string_attr(child, cidre::ax::attr::document()).unwrap_or_default();
-                            let cval = get_ax_string_attr(child, cidre::ax::attr::value()).unwrap_or_default();
-                            
-                            if !ctitle.is_empty() || !cdoc.is_empty() || cval.contains("meet") || cval.contains("google") {
-                                println!("  child[{}] role={:?} title={:?} doc={:?} val={:?}", 
-                                    k, crole, &ctitle[..ctitle.len().min(60)], &cdoc[..cdoc.len().min(60)], &cval[..cval.len().min(80)]);
+                            let crole = get_ax_string_attr(child, cidre::ax::attr::role())
+                                .unwrap_or_default();
+                            let ctitle = get_ax_string_attr(child, cidre::ax::attr::title())
+                                .unwrap_or_default();
+                            let cdoc = get_ax_string_attr(child, cidre::ax::attr::document())
+                                .unwrap_or_default();
+                            let cval = get_ax_string_attr(child, cidre::ax::attr::value())
+                                .unwrap_or_default();
+
+                            if !ctitle.is_empty()
+                                || !cdoc.is_empty()
+                                || cval.contains("meet")
+                                || cval.contains("google")
+                            {
+                                println!(
+                                    "  child[{}] role={:?} title={:?} doc={:?} val={:?}",
+                                    k,
+                                    crole,
+                                    &ctitle[..ctitle.len().min(60)],
+                                    &cdoc[..cdoc.len().min(60)],
+                                    &cval[..cval.len().min(80)]
+                                );
                             }
                         }
                     }
